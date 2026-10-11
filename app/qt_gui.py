@@ -5,6 +5,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,11 +22,15 @@ from PySide6.QtWidgets import (
 from .artwork import ensure_art, photo_file
 from .discovery import discover
 from .launcher import launch
-from .fps_overlay import FPSController
+from .fps_overlay import FPSController, find_pid_for_executable
+from .game_process import (
+    stop_gracefully, force_terminate_verified, is_exact_process_alive,
+)
 from .library import add_manual, load, save, sync_found, update_game
 from .optimization import (PROFILE_INFO, PROFILE_ORDER, get_adapter, is_running,
                            monitor_and_restore, prepare_game, read_session,
-                           restore_game, restore_stale_sessions)
+                           restore_game, restore_stale_sessions,
+                           pending_backup_status, accept_current_config)
 from .ui_dialogs import ProfileDialog
 from .ui_widgets import (
     P, FeaturedAccordion, Grainient, SidebarItem, SplashOverlay, SwipeToast,
@@ -66,11 +71,18 @@ def style_app(app:QApplication):
             border:1px solid {P["stroke"]};border-radius:9px;padding:7px 12px;}}
         QPushButton#subtle:hover{{background:#303049;color:{P["ink"]};}}
         QToolTip{{background:{P["panel2"]};color:{P["ink"]};border:1px solid {P["stroke"]};}}
+        QMessageBox{{background:{P["panel"]};}}
+        QMessageBox QLabel{{color:{P["ink"]};background:transparent;font-size:10pt;}}
+        QMessageBox QPushButton{{background:{P["panel2"]};color:{P["ink"]};
+            border:1px solid {P["stroke"]};border-radius:8px;
+            min-width:88px;min-height:28px;padding:4px 12px;}}
+        QMessageBox QPushButton:hover{{background:#3d3357;border-color:{P["accent"]};}}
     """)
 
 
 class GameCard(QFrame):
     playClicked=Signal(dict)
+    stopClicked=Signal(dict)
     gearClicked=Signal(dict)
     def __init__(self,game,parent=None):
         super().__init__(parent)
@@ -109,10 +121,11 @@ class GameCard(QFrame):
         info.addWidget(sub)
         row=QHBoxLayout()
         row.setSpacing(8)
-        play=make_button("▶   PLAY",filled=True)
-        play.setMinimumHeight(41)
-        play.clicked.connect(lambda:self.playClicked.emit(self.game))
-        row.addWidget(play,1)
+        self.play=make_button("▶   PLAY",filled=True)
+        self.play.setMinimumHeight(41)
+        self.launch_state="idle"
+        self.play.clicked.connect(self.on_action)
+        row.addWidget(self.play,1)
         gear=make_button("⚙",secondary=True)
         gear.setFixedSize(43,41)
         gear.setToolTip("Configurar modo de inicializacao")
@@ -122,6 +135,40 @@ class GameCard(QFrame):
         info.addLayout(row)
         main.addLayout(info)
         self.update_cover()
+
+    def on_action(self):
+        if self.launch_state=="running":
+            self.stopClicked.emit(self.game)
+        elif self.launch_state=="idle":
+            self.playClicked.emit(self.game)
+
+    def set_launch_state(self,state:str):
+        if state==self.launch_state:
+            return
+        self.launch_state=state
+        if state=="running":
+            self.play.setText("■   INTERROMPER")
+            self.play.setEnabled(True)
+            self.play.setStyleSheet(
+                "QPushButton{background:#853848;color:#ffffff;border:0;"
+                "border-radius:9px;font-weight:700;padding:8px 10px;}"
+                "QPushButton:hover{background:#b44257;}")
+        elif state=="stopping":
+            self.play.setText("■  ENCERRANDO...")
+            self.play.setEnabled(False)
+            self.play.setStyleSheet(
+                "QPushButton{background:#58404a;color:#d8b0bb;border:0;"
+                "border-radius:9px;font-weight:700;}")
+        elif state=="starting":
+            self.play.setText("◌   INICIANDO...")
+            self.play.setEnabled(False)
+            self.play.setStyleSheet(
+                "QPushButton{background:#343042;color:#aca3c2;border:0;"
+                "border-radius:9px;font-weight:700;}")
+        else:
+            self.play.setText("▶   PLAY")
+            self.play.setEnabled(True)
+            self.play.setStyleSheet("")
 
     def update_cover(self):
         file=photo_file(self.game)
@@ -154,6 +201,8 @@ class MainWindow(QMainWindow):
         self.search_query=""
         self.scan_busy=False
         self.cards={}
+        # Only games started by SuperRender in this session can be interrupted.
+        self.active_launches={}
         self.art_loading=set()
         self.toast=None
         self._render_later=QTimer(self);self._render_later.setSingleShot(True)
@@ -163,6 +212,10 @@ class MainWindow(QMainWindow):
         self.fps_hud.notify.connect(lambda msg: self.messages.put(("session", msg)))
         self.poll=QTimer(self);self.poll.setInterval(150);self.poll.timeout.connect(self.process_messages)
         self.poll.start()
+        self.running_poll=QTimer(self)
+        self.running_poll.setInterval(1200)
+        self.running_poll.timeout.connect(self.refresh_game_states)
+        self.running_poll.start()
         QTimer.singleShot(320,self.scan)
         QTimer.singleShot(200,self.show_splash)
 
@@ -217,7 +270,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.3.2",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.3.3",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
@@ -409,9 +462,13 @@ class MainWindow(QMainWindow):
         for i,game in enumerate(games[:120]):
             card=GameCard(game)
             card.playClicked.connect(self.on_play)
+            card.stopClicked.connect(self.on_stop)
             card.gearClicked.connect(self.on_gear)
             self.tiles.addWidget(card,i//cols,i%cols)
             self.cards[game["id"]]=card
+            entry=self.active_launches.get(game["id"])
+            if entry:
+                card.set_launch_state(entry.get("state","starting"))
             self.request_art(game)
         for col in range(cols):
             self.tiles.setColumnStretch(col,1)
@@ -484,6 +541,8 @@ class MainWindow(QMainWindow):
             elif typ=="scan_error":
                 self.scan_busy=False;self.scan_button.setEnabled(True)
                 self.show_toast("Falha ao buscar jogos",str(data))
+            elif typ=="stop_result":
+                self.handle_stop_result(data)
             elif typ=="session":
                 self.show_toast("SuperRender",data)
         if self.toast and self.toast.isVisible():
@@ -517,6 +576,10 @@ class MainWindow(QMainWindow):
         self.show_toast("Jogo adicionado",new["name"])
 
     def on_play(self,game):
+        if game.get("id") in self.active_launches:
+            self.show_toast("Jogo em execucao",
+                            "Use Interromper para fechar o jogo antes de iniciar novamente.")
+            return
         if game.get("skip_profile_dialog") and game.get("profile_is_default"):
             mode=game.get("default_profile","normal")
             if mode in PROFILE_ORDER:
@@ -524,22 +587,66 @@ class MainWindow(QMainWindow):
                 return
         self.show_profile_dialog(game,launch_after=True)
 
+    def resolve_pending_backup(self,game,allow_later:bool=False)->bool:
+        """User decides conflicts; already-restored files clear automatically."""
+        status=pending_backup_status(game)
+        if status=="none":
+            return True
+        if status=="running":
+            if not allow_later:
+                QMessageBox.warning(
+                    self,"Jogo aberto",
+                    "Feche o jogo antes de resolver um backup de configuracao.")
+            return bool(allow_later)
+        if status in ("already_original","applied"):
+            try:
+                message=restore_game(game)
+                if read_session(game):
+                    raise RuntimeError(message or "O backup continua pendente.")
+                self.show_toast("Backup resolvido",message)
+                return True
+            except Exception as exc:
+                QMessageBox.warning(self,"Backup do jogo",str(exc))
+                return bool(allow_later)
+        if status=="missing":
+            QMessageBox.warning(
+                self,"Backup incompleto",
+                "Nao consegui localizar o arquivo de configuracao ou o backup. "
+                "Nao vou sobrescrever dados do jogo. Verifique a pasta "
+                "SuperRender\\backups em AppData Local.")
+            return bool(allow_later)
+
+        box=QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("SuperRender | Configuracoes do jogo")
+        box.setText("O jogo modificou a configuracao depois da otimizacao.")
+        box.setInformativeText(
+            "O arquivo atual e diferente do arquivo original e do perfil "
+            "temporario do SuperRender.\n\n"
+            "Deseja manter a configuracao atual ou restaurar o backup anterior? "
+            "As duas versoes serao preservadas em seguranca."
+        )
+        keep=box.addButton("Manter configuracao atual",QMessageBox.AcceptRole)
+        restore=box.addButton("Restaurar backup anterior",QMessageBox.ActionRole)
+        later=box.addButton("Agora nao",QMessageBox.RejectRole)
+        box.setDefaultButton(later)
+        box.exec()
+        selected=box.clickedButton()
+        if selected==later or selected is None:
+            return bool(allow_later)
+        try:
+            result=(accept_current_config(game) if selected==keep
+                    else restore_game(game,force=True))
+            if read_session(game):
+                raise RuntimeError(result or "Backup pendente.")
+            self.show_toast("Backup resolvido",result)
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self,"Backup do jogo",str(exc))
+            return bool(allow_later)
+
     def on_gear(self,game):
-        if read_session(game):
-            choice=QMessageBox.question(
-                self,"SuperRender — backup pendente",
-                "Existe uma configuracao temporaria deste jogo.\n\n"
-                "Deseja restaurar o backup original agora? O estado atual sera "
-                "preservado em outro backup por seguranca.\n\n"
-                "Escolha Nao para continuar apenas editando as preferencias.",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            )
-            if choice==QMessageBox.Yes:
-                try:
-                    result=restore_game(game,force=True)
-                    self.show_toast("Backup",result)
-                except Exception as exc:
-                    QMessageBox.warning(self,"Restauracao",str(exc))
+        self.resolve_pending_backup(game,allow_later=True)
         self.show_profile_dialog(game,launch_after=False)
 
     def show_profile_dialog(self,game,launch_after):
@@ -568,49 +675,179 @@ class MainWindow(QMainWindow):
             self.render_cards()
 
     def start_game(self,game,mode):
-        if mode not in PROFILE_ORDER:mode="normal"
+        if mode not in PROFILE_ORDER:
+            mode="normal"
+        if game.get("id") in self.active_launches:
+            self.show_toast("Jogo em execucao","Use Interromper antes de iniciar novamente.")
+            return
         if is_running(game):
             self.show_toast("Jogo ja esta aberto",game.get("name","Jogo"))
             return
-        # Prepara RTSS ANTES de abrir o jogo: hook fullscreen precisa estar
-        # ativo no inicio. Outros PCs podem aceitar instalacao automatica.
-        self.fps_hud.prepare_backend(self)
-        # Nunca testar diretamente processos do jogo: ajustes de arquivo
-        # so acontecem quando o usuario solicita iniciar.
+
+        # Primeiro resolve o backup pendente, antes de alterar mais arquivos.
+        if not self.resolve_pending_backup(game):
+            return
         try:
-            pending=read_session(game)
-            if pending:
-                result=restore_game(game)
-                if read_session(game):
-                    raise RuntimeError("Backup pendente: "+result)
             modified=prepare_game(game,mode)
         except Exception as error:
-            QMessageBox.warning(self,"SuperRender — perfil",str(error))
+            QMessageBox.warning(self,"SuperRender | Perfil",str(error))
             return
+
+        # RTSS so e inicializado apos validar o perfil e antes de abrir o jogo.
+        # Falha ou recusa de instalacao nao deve bloquear modo normal.
+        self.fps_hud.prepare_backend(self)
         try:
-            answer=launch(game,mode,notify=lambda text:self.messages.put(("session",text)))
+            answer=launch(game,mode,
+                          notify=lambda text:self.messages.put(("session",text)))
         except Exception as error:
             if modified:
-                restore_game(game)
+                result=restore_game(game)
+                if read_session(game):
+                    self.messages.put(("session","Backup mantido: "+result))
             QMessageBox.critical(self,"Nao foi possivel iniciar",str(error))
             return
-        # O FPS e monitorado sem modificar arquivos do jogo.
+
+        # Somente jogos iniciados por ESTE SuperRender podem usar Interromper.
+        ident=game["id"]
+        self.active_launches[ident]={
+            "game":dict(game),"state":"starting","pid":None,
+            "seen":False,"misses":0,"started":time.monotonic(),
+            "stopping":False,
+        }
+        self._update_card_state(ident,"starting")
         self.fps_hud.start_game(game)
         if modified:
-            threading.Thread(target=monitor_and_restore,
-                             args=(dict(game),lambda text:self.messages.put(("session",text))),
-                             daemon=True,name="sr-restore-monitor").start()
+            threading.Thread(
+                target=monitor_and_restore,
+                args=(dict(game),
+                      lambda text:self.messages.put(("session",text))),
+                daemon=True,name="sr-restore-monitor",
+            ).start()
         self.show_toast(PROFILE_INFO[mode]["title"],shortened(answer,100))
         if mode not in ("normal","light") and not get_adapter(game):
             self.show_toast("Sem adaptador grafico",
-                            "Este jogo ainda nao possui ajustes graficos especificos. "
-                            "Apenas prioridade de processo foi aplicada.")
-        # Menos processamento de interface enquanto o jogo estiver ativo.
+                            "Este jogo ainda nao possui ajustes graficos especificos.")
         self.gradient.timing.stop()
         QTimer.singleShot(650,self.showMinimized)
 
+    def _update_card_state(self,ident,state:str):
+        card=self.cards.get(ident)
+        if card is not None:
+            card.set_launch_state(state)
+
+    def refresh_game_states(self):
+        """Checks only SuperRender-launched games, not every process on PC."""
+        now=time.monotonic()
+        for ident,entry in list(self.active_launches.items()):
+            exe=str(entry["game"].get("exe") or "")
+            pid=find_pid_for_executable(exe) if exe else None
+            if pid:
+                entry["pid"]=pid
+                entry["seen"]=True
+                entry["misses"]=0
+                new_state="stopping" if entry["stopping"] else "running"
+                entry["state"]=new_state
+                self._update_card_state(ident,new_state)
+                continue
+
+            if entry["seen"]:
+                entry["misses"]+=1
+                if entry["misses"]<2:
+                    continue
+                self._finished_game(ident)
+                continue
+
+            if now-entry["started"]>100:
+                self._finished_game(ident)
+                self.show_toast(
+                    "Inicializacao nao detectada",
+                    "Nao consegui localizar o processo do jogo. "
+                    "Confira o executavel detectado na biblioteca.")
+            else:
+                entry["state"]="starting"
+                self._update_card_state(ident,"starting")
+
+    def _finished_game(self,ident:str):
+        entry=self.active_launches.pop(ident,None)
+        self._update_card_state(ident,"idle")
+        if entry and self.fps_hud.game and self.fps_hud.game.get("id")==ident:
+            self.fps_hud.stop()
+
+    def on_stop(self,game):
+        """Close just the selected game's process, as a Steam-style Stop."""
+        ident=game.get("id")
+        entry=self.active_launches.get(ident)
+        if not entry:
+            self.show_toast("Jogo nao gerenciado","Este jogo nao foi iniciado por esta sessao.")
+            return
+        pid=entry.get("pid")
+        exe=str(entry["game"].get("exe") or "")
+        if not pid or not exe:
+            self.show_toast("Aguardando jogo","O executavel ainda nao foi localizado.")
+            return
+        if entry["stopping"]:
+            return
+        entry["stopping"]=True
+        entry["state"]="stopping"
+        self._update_card_state(ident,"stopping")
+        self.executor.submit(self._close_game_worker,ident,int(pid),exe)
+
+    def _close_game_worker(self,ident,pid,exe):
+        try:
+            outcome=stop_gracefully(pid,exe,timeout_seconds=8)
+        except Exception as exc:
+            outcome="error:"+str(exc)
+        self.messages.put(("stop_result",{
+            "id":ident,"pid":pid,"exe":exe,"outcome":outcome,"forced":False,
+        }))
+
+    def _force_game_worker(self,ident,pid,exe):
+        try:
+            outcome=force_terminate_verified(pid,exe)
+        except Exception as exc:
+            outcome="error:"+str(exc)
+        self.messages.put(("stop_result",{
+            "id":ident,"pid":pid,"exe":exe,"outcome":outcome,"forced":True,
+        }))
+
+    def handle_stop_result(self,result):
+        ident=result["id"]
+        entry=self.active_launches.get(ident)
+        if not entry or entry.get("pid")!=result["pid"]:
+            return
+        outcome=result["outcome"]
+        if outcome in ("closed","not_found"):
+            self._finished_game(ident)
+            self.show_toast("Jogo interrompido",
+                            entry["game"].get("name","Jogo")+" foi encerrado.")
+            # O monitor de perfil ira restaurar o backup ao ver o fim do processo.
+            return
+        if outcome=="needs_force" and not result.get("forced"):
+            if not is_exact_process_alive(result["pid"],result["exe"]):
+                self._finished_game(ident)
+                return
+            response=QMessageBox.question(
+                self,"SuperRender | Interromper jogo",
+                "O jogo nao respondeu ao encerramento normal.\n\n"
+                "Deseja forcar a interrupcao do executavel deste jogo? "
+                "Progresso nao salvo pode ser perdido. "
+                "Outros jogos e launchers nao serao encerrados.",
+                QMessageBox.Yes|QMessageBox.No,QMessageBox.No,
+            )
+            if response==QMessageBox.Yes:
+                self.executor.submit(self._force_game_worker,ident,
+                                     result["pid"],result["exe"])
+                return
+        entry["stopping"]=False
+        entry["state"]="running"
+        self._update_card_state(ident,"running")
+        if outcome not in ("needs_force",):
+            self.show_toast("Nao foi possivel interromper",
+                            shortened(outcome,150))
+
     def closeEvent(self,event):
         self.gradient.timing.stop()
+        self.running_poll.stop()
         self.fps_hud.close()
         self.executor.shutdown(wait=False,cancel_futures=True)
         # Monitoramento de jogo continua so enquanto o programa estiver aberto.

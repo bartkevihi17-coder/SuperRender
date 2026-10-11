@@ -154,6 +154,57 @@ def _write_bytes_atomic(destination: Path, data: bytes) -> None:
     os.replace(tmp, destination)
 
 
+def pending_backup_status(game: dict) -> str:
+    """none, running, already_original, applied, changed or missing.
+
+    This avoids treating an already-restored CFG as a conflicting session.
+    """
+    state=read_session(game)
+    if not state:
+        return "none"
+    if is_running(game):
+        return "running"
+    config=Path(state.get("config") or "")
+    if not config.is_file():
+        return "missing"
+    try:
+        digest=_sha(config.read_bytes())
+    except OSError:
+        return "missing"
+    if digest==state.get("original_sha256"):
+        return "already_original"
+    if digest==state.get("applied_sha256"):
+        return "applied"
+    return "changed"
+
+
+def accept_current_config(game: dict) -> str:
+    """Keeps game changes and archives both versions; does not overwrite CFG.
+
+    Use only after the user explicitly chooses to keep the current settings.
+    """
+    with _LOCK:
+        state=read_session(game)
+        if state is None:
+            return "Nenhum backup pendente."
+        if is_running(game):
+            raise RuntimeError("O jogo ainda esta aberto. Feche-o antes de resolver o backup.")
+        config=Path(state.get("config") or "")
+        original=Path(state.get("backup") or "")
+        if not config.is_file() or not original.is_file():
+            raise FileNotFoundError("Configuracao ou backup original nao encontrado.")
+        if _sha(original.read_bytes()) != state.get("original_sha256"):
+            raise RuntimeError("O backup original nao passou na verificacao de integridade.")
+        current=config.read_bytes()
+        _BACKUPS.mkdir(parents=True,exist_ok=True)
+        preserved=_BACKUPS/("current-preserved-"+uuid.uuid4().hex[:12]+".cfg")
+        preserved.write_bytes(current)
+        if _sha(preserved.read_bytes())!=_sha(current):
+            raise OSError("Nao foi possivel confirmar a copia de seguranca.")
+        session_file(game).unlink()
+        return "Configuracoes atuais mantidas. Copias das duas versoes preservadas."
+
+
 def restore_game(game: dict, force: bool = False) -> str:
     """Restaura o CFG quando possivel.
 
@@ -168,11 +219,18 @@ def restore_game(game: dict, force: bool = False) -> str:
             return "Nao restaurado: o jogo ainda esta aberto."
         original = Path(state.get("backup", ""))
         config = Path(state.get("config", ""))
-        if not original.is_file():
-            return "Backup nao encontrado; restauracao manual necessaria."
         if not config.is_file():
             return "Arquivo de configuracao foi removido; backup preservado."
         current_bytes = config.read_bytes()
+        # O jogo pode ter restaurado o arquivo ao sair. Nao bloquear
+        # proximas inicializacoes nem reescrever um arquivo ja original.
+        if _sha(current_bytes) == state.get("original_sha256"):
+            session_file(game).unlink(missing_ok=True)
+            return "Configuracao original ja estava restaurada. Sessao pendente limpa."
+        if not original.is_file():
+            return "Backup nao encontrado; restauracao manual necessaria."
+        if _sha(original.read_bytes()) != state.get("original_sha256"):
+            return "Backup original nao passou na verificacao; nenhuma mudanca feita."
         if _sha(current_bytes) != state.get("applied_sha256"):
             if not force:
                 # Jogo ou usuario alterou o CFG: nunca apagar mudancas sem autorizacao.
@@ -203,8 +261,8 @@ def prepare_game(game: dict, profile: str) -> dict | None:
             result = restore_game(game)
             if read_session(game):
                 raise RuntimeError(
-                    "Ha um backup pendente para este jogo. " + result +
-                    " Abra a area de backup e restaure antes de aplicar outro perfil."
+                    "Backup pendente. " + result +
+                    " Escolha manter as configuracoes atuais ou restaurar o backup."
                 )
         file = nba_config_path()
         data = file.read_bytes()

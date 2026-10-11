@@ -64,6 +64,52 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(self.cfg.is_file())
         self.assertIsNotNone(opt.read_session(self.game))
 
+    def test_stale_session_cleaned_if_game_restored_original(self):
+        opt.prepare_game(self.game,"light")
+        self.assertIsNotNone(opt.read_session(self.game))
+        # Reproduces real NBA 2K20 case: game restores original CFG on exit.
+        self.cfg.write_bytes(self.original_bytes)
+        self.assertEqual(opt.pending_backup_status(self.game),"already_original")
+        result=opt.restore_game(self.game)
+        self.assertIn("ja estava restaurada",result)
+        self.assertEqual(self.cfg.read_bytes(),self.original_bytes)
+        self.assertIsNone(opt.read_session(self.game))
+
+    def test_new_profile_after_game_restores_original(self):
+        opt.prepare_game(self.game,"light")
+        self.cfg.write_bytes(self.original_bytes)
+        opt.prepare_game(self.game,"potato")
+        self.assertIsNotNone(opt.read_session(self.game))
+        result=json.loads(self.cfg.read_text(encoding="utf-8"))
+        self.assertEqual((result["WIDTH"],result["HEIGHT"]),(640,480))
+
+    def test_keep_current_config_preserves_both_backups(self):
+        opt.prepare_game(self.game,"optimized")
+        current=json.loads(self.cfg.read_text(encoding="utf-8"))
+        current["VSYNC"]=1
+        data=json.dumps(current).encode("utf-8")
+        self.cfg.write_bytes(data)
+        self.assertEqual(opt.pending_backup_status(self.game),"changed")
+        msg=opt.accept_current_config(self.game)
+        self.assertIn("atuais mantidas",msg)
+        self.assertIsNone(opt.read_session(self.game))
+        self.assertEqual(self.cfg.read_bytes(),data)
+        backups=list((self.root/"backups").glob("*.cfg"))
+        self.assertGreaterEqual(len(backups),2)
+        self.assertTrue(any(file.read_bytes()==self.original_bytes for file in backups))
+        self.assertTrue(any(file.read_bytes()==data for file in backups))
+
+    def test_force_restore_preserves_edited_cfg_and_original(self):
+        opt.prepare_game(self.game,"optimized")
+        edited=b'{"WIDTH": 870, "HEIGHT": 540}'
+        self.cfg.write_bytes(edited)
+        self.assertEqual(opt.pending_backup_status(self.game),"changed")
+        opt.restore_game(self.game,force=True)
+        self.assertEqual(self.cfg.read_bytes(),self.original_bytes)
+        self.assertIsNone(opt.read_session(self.game))
+        self.assertTrue(any(p.read_bytes()==edited for p in
+                            (self.root/"backups").glob("*.cfg")))
+
     def test_custom_game_not_modified(self):
         other=dict(self.game)
         other.update({"name":"Skater XL","exe":str(self.root/"skater.exe"),

@@ -1,6 +1,6 @@
 # SuperRender
 
-**v0.3.2 · Biblioteca de jogos e laboratório de desempenho para Windows**
+**v0.3.3 · Biblioteca de jogos e laboratório de desempenho para Windows**
 
 Aplicativo nativo escrito em Python e Qt (PySide6). Não depende de navegador, HTML, WebGPU ou servidor local. Jogos, favoritos e preferências são armazenados somente no computador do usuário, em `%LOCALAPPDATA%\SuperRender`.
 
@@ -22,6 +22,32 @@ A interface traz um menu recolhível, busca, galeria de destaques, notificaçõe
 O programa **não promete ganhos fixos de FPS**. Adaptações gráficas são específicas de cada jogo. O NBA 2K20 usa seu arquivo `VideoSettings.cfg`, sempre com cópia de segurança e restauração verificável. Jogos com anticheat não recebem alterações automáticas de prioridade.
 
 Você pode escolher um perfil principal e marcar **abrir sem perguntar novamente**. A engrenagem permite alterar essa escolha depois.
+
+## Play e Interromper (0.3.3)
+
+- O botao **Play** abre o jogo no perfil escolhido.
+- Enquanto o SuperRender identificar o processo de um jogo que **ele mesmo
+  iniciou**, o botao vira **Interromper**, com destaque vermelho.
+- Interromper solicita primeiro o fechamento normal da janela do jogo
+  (\`WM_CLOSE\`), permitindo que o jogo encerre da forma habitual.
+- Se ele nao responder, pergunta explicitamente antes de forcar o encerramento:
+  **progresso nao salvo podera ser perdido**.
+- O comando verifica o **PID e o caminho completo do executavel**. Nao encerra
+  a Steam, a Epic ou outros processos apenas por estarem relacionados ao jogo.
+- Se a instalacao nao informar o executavel real, o SuperRender sinaliza
+  quando nao consegue controlar o processo. O atalho de iniciacao continua
+  funcionando quando o launcher permitir.
+
+### Corrigido: backup pendente do NBA 2K20
+
+Se o jogo ja devolveu \`VideoSettings.cfg\` ao estado original, o SuperRender
+reconhece os arquivos identicos por SHA-256 e remove somente o registro
+pendente, sem alterar o jogo.
+
+Quando a configuracao atual difere tanto da original quanto da otimizada,
+o usuario escolhe **Manter configuracao atual** ou **Restaurar backup anterior**.
+As duas versoes sao preservadas e a resolucao nunca e forcada em silencio.
+Isso evita bloquear o Play quando o jogo muda seu proprio CFG ao sair.
 
 ## FPS sobre os jogos, inclusive tela cheia
 
