@@ -14,7 +14,7 @@ import math
 import random
 from pathlib import Path
 
-from PySide6.QtCore import (Qt, QEvent, QEasingCurve, Property, QPropertyAnimation,
+from PySide6.QtCore import (Qt, QEvent, QEasingCurve, Property, QPropertyAnimation, QAbstractAnimation,
                              QRectF, QPoint, QPointF, QTimer, Signal)
 from PySide6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
                            QPainterPath, QPen, QPixmap, QRadialGradient)
@@ -327,7 +327,7 @@ class SwipeToast(QFrame):
         lay.setSpacing(5)
         upper=QHBoxLayout()
         upper.addWidget(label(title,11,"ink",True),1)
-        x=make_button("×",secondary=True)
+        x=make_button("Ã—",secondary=True)
         x.setFixedSize(26,26)
         x.clicked.connect(self.dismiss)
         upper.addWidget(x)
@@ -400,7 +400,7 @@ class StickerBadge(QWidget):
         super().__init__(parent)
         self.original=pixmap
         self._angle=-11.0
-        self.setFixedSize(192,192)
+        self.setFixedSize(236,236)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
 
     def _get_angle(self):return self._angle
@@ -411,13 +411,15 @@ class StickerBadge(QWidget):
         p=QPainter(self);p.setRenderHint(QPainter.Antialiasing)
         p.translate(self.width()/2,self.height()/2)
         p.rotate(self._angle)
-        shadow=QRectF(-56,-56,122,122)
+        # A arte ocupa o centro visual do splash, nao um icone pequeno.
+        p.scale(1.46,1.46)
+        shadow=QRectF(-61,-61,122,122)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(0,0,0,84));p.drawRoundedRect(shadow.translated(8,11),18,18)
         p.setBrush(color("#f6edff"));p.drawRoundedRect(shadow,18,18)
         pix=self.original
         if not pix.isNull():
-            target=QRectF(-47,-47,104,104)
+            target=QRectF(-52,-52,104,104)
             p.drawPixmap(target,pix,QRectF(pix.rect()))
         # dobra do adesivo: pequena aba com diagonal
         fold=QPainterPath()
@@ -429,74 +431,110 @@ class StickerBadge(QWidget):
 
 
 class SplashOverlay(QWidget):
-    """Fade-in, blur do aplicativo abaixo, selo nao clicavel, fade-out."""
+    """Vinheta temporaria: adesivo EXATAMENTE centralizado, blur ao fundo."""
     finished=Signal()
+
     def __init__(self,parent,behind:QWidget,logo:QPixmap):
         super().__init__(parent)
         self.setObjectName("splash")
         self.setAttribute(Qt.WA_StyledBackground,True)
-        self.setStyleSheet("background:rgba(8,8,20,215);")
+        self.setAttribute(Qt.WA_TransparentForMouseEvents,True)
+        self.setStyleSheet("QWidget#splash{background:rgba(8,8,20,215);}")
         self.behind=behind
         self.blur=QGraphicsBlurEffect(behind)
-        self.blur.setBlurRadius(13)
+        self.blur.setBlurRadius(15)
         behind.setGraphicsEffect(self.blur)
         self.badge=StickerBadge(logo,self)
         self.loading=label("PREPARANDO SUA BIBLIOTECA",11,"ink",True)
         self.loading.setParent(self)
         self.loading.setAlignment(Qt.AlignCenter)
-        self.loading.setStyleSheet(f"color:{P['muted']};background:transparent;letter-spacing:2px;")
+        self.loading.setStyleSheet(
+            f"color:{P['muted']};background:transparent;letter-spacing:2px;")
         self.brand=label("SUPERRENDER",25,"ink",True)
         self.brand.setParent(self)
         self.brand.setAlignment(Qt.AlignCenter)
-        self.brand.setStyleSheet(f"color:{P['ink']};background:transparent;letter-spacing:3px;")
+        self.brand.setStyleSheet(
+            f"color:{P['ink']};background:transparent;letter-spacing:3px;")
+        self._exiting=False
+        # Geometria do splash configurada ANTES de calcular o destino.
         self.setGeometry(parent.rect())
+        center=self.badge_target()
+        self.layout_caption()
         self._anim_badge=QPropertyAnimation(self.badge,b"angle",self)
-        self._anim_badge.setDuration(730)
+        self._anim_badge.setDuration(735)
         self._anim_badge.setEasingCurve(QEasingCurve.OutBack)
-        self._anim_badge.setStartValue(-24.0);self._anim_badge.setEndValue(4.0)
-        self.opacity=QGraphicsOpacityEffect(self);self.setGraphicsEffect(self.opacity)
+        self._anim_badge.setStartValue(-24.0)
+        self._anim_badge.setEndValue(4.0)
+        self.opacity=QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.opacity)
         self._fade=QPropertyAnimation(self.opacity,b"opacity",self)
-        self._fade.setDuration(400);self._fade.setEasingCurve(QEasingCurve.InOutCubic)
+        self._fade.setDuration(410)
+        self._fade.setEasingCurve(QEasingCurve.InOutCubic)
         self._fade.finished.connect(self.end)
-        self._timer=QTimer(self);self._timer.setSingleShot(True)
+        self._timer=QTimer(self)
+        self._timer.setSingleShot(True)
         self._timer.timeout.connect(self.dismiss)
-        center=self.badge.pos()
-        start=QPoint(center.x(),-self.badge.height()-22)
+        start=QPoint(center.x(),-self.badge.height()-26)
         self.badge.move(start)
         self._travel=QPropertyAnimation(self.badge,b"pos",self)
-        self._travel.setStartValue(start);self._travel.setEndValue(center)
-        self._travel.setDuration(760)
+        self._travel.setStartValue(start)
+        self._travel.setEndValue(center)
+        self._travel.setDuration(780)
         self._travel.setEasingCurve(QEasingCurve.OutBack)
+        self.show()
+        self.raise_()
         self._travel.start()
-        self._anim_badge.start();self._timer.start(1650)
-        self.show();self.raise_()
+        self._anim_badge.start()
+        self._timer.start(1700)
+
+    def badge_target(self)->QPoint:
+        """Centraliza o adesivo pelo centro geometrico da janela inteira."""
+        return QPoint(
+            (self.width()-self.badge.width())//2,
+            (self.height()-self.badge.height())//2,
+        )
+
+    def layout_caption(self):
+        w=self.width()
+        target=self.badge_target()
+        bottom=target.y()+self.badge.height()
+        self.brand.setGeometry(0,bottom+2,w,46)
+        self.loading.setGeometry(0,bottom+50,w,28)
 
     def resizeEvent(self,event):
-        w,h=self.width(),self.height()
-        self.badge.move((w-self.badge.width())//2,max(8,h//2-154))
-        self.brand.setGeometry(0,h//2+38,w,52)
-        self.loading.setGeometry(0,h//2+99,w,30)
+        target=self.badge_target()
+        self.layout_caption()
+        travel=getattr(self,"_travel",None)
+        if travel is None or travel.state()==QAbstractAnimation.Stopped:
+            if not self._exiting:
+                self.badge.move(target)
+        elif not self._exiting:
+            travel.setEndValue(target)
         super().resizeEvent(event)
 
     def dismiss(self):
-        if not self.isVisible():return
+        if not self.isVisible() or self._exiting:
+            return
+        self._exiting=True
         self._travel.stop()
         self._travel.setStartValue(self.badge.pos())
-        self._travel.setEndValue(QPoint(self.width()+40,self.badge.y()-145))
-        self._travel.setDuration(430)
+        self._travel.setEndValue(QPoint(self.width()+self.badge.width(),
+                                        self.badge.y()-95))
+        self._travel.setDuration(440)
         self._travel.setEasingCurve(QEasingCurve.InCubic)
         self._travel.start()
         self._anim_badge.stop()
         self._anim_badge.setStartValue(self.badge.angle)
-        self._anim_badge.setEndValue(46.)
-        self._anim_badge.setDuration(420)
+        self._anim_badge.setEndValue(38.0)
+        self._anim_badge.setDuration(410)
         self._anim_badge.start()
-        self._fade.setStartValue(1.0);self._fade.setEndValue(0.0)
+        self._fade.setStartValue(self.opacity.opacity())
+        self._fade.setEndValue(0.0)
         self._fade.start()
 
     def end(self):
         self.hide()
+        self._timer.stop()
         self.behind.setGraphicsEffect(None)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents,True)
         self.finished.emit()
         self.deleteLater()

@@ -217,7 +217,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.3.1",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.3.2",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
@@ -572,6 +572,9 @@ class MainWindow(QMainWindow):
         if is_running(game):
             self.show_toast("Jogo ja esta aberto",game.get("name","Jogo"))
             return
+        # Prepara RTSS ANTES de abrir o jogo: hook fullscreen precisa estar
+        # ativo no inicio. Outros PCs podem aceitar instalacao automatica.
+        self.fps_hud.prepare_backend(self)
         # Nunca testar diretamente processos do jogo: ajustes de arquivo
         # so acontecem quando o usuario solicita iniciar.
         try:

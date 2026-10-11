@@ -20,6 +20,6 @@ run([
     "--add-data","third_party/PresentMon-1.10.0-x64.exe;third_party",
     "--add-data","third_party/PresentMon-LICENSE.txt;third_party",
     "--name","SuperRender",
-    "--distpath","dist",
+    "--distpath",os.environ.get("SUPERRENDER_DIST_DIR","dist"),
     "run.pyw",
 ])

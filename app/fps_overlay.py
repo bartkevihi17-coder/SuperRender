@@ -26,6 +26,7 @@ import uuid
 from PySide6.QtCore import Qt, QObject, QTimer, Signal, QAbstractNativeEventFilter, QPoint
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QApplication, QWidget
+from .rtss_backend import RTSSOSD, RTSSProvisioner, mapping_available
 
 HOTKEY_ID = 0x7A71
 WM_HOTKEY = 0x0312
@@ -440,6 +441,9 @@ class FPSController(QObject):
         self.last_pid_check=0.0
         self.last_fps=None
         self.rtss=RTSSFPS()
+        self.rtss_osd=RTSSOSD()
+        self.rtss_provisioner=RTSSProvisioner()
+        self.prefer_native_rtss=False
         self.presentmon=PresentMonStream()
         self.timer=QTimer(self)
         self.timer.setInterval(390)
@@ -447,6 +451,14 @@ class FPSController(QObject):
         self.timer.start()
         self._capture_delayed=False
         self._warned=False
+
+    def prepare_backend(self, parent: QWidget):
+        """Start an installed RTSS or offer a consent-based automatic install."""
+        self.prefer_native_rtss=self.rtss_provisioner.provision(parent)
+        if self.prefer_native_rtss:
+            self.notify.emit("OSD dentro do jogo ativado para tela cheia.")
+        elif self.rtss_provisioner.last_error:
+            self.notify.emit("OSD RTSS indisponivel: "+self.rtss_provisioner.last_error)
 
     def start_game(self,game):
         self.stop()
@@ -467,6 +479,7 @@ class FPSController(QObject):
         self.visible_requested=not self.visible_requested
         if not self.visible_requested:
             self.overlay.hide()
+            self.rtss_osd.hide()
         self.notify.emit("Contador de FPS "+("ativado" if self.visible_requested else "oculto"))
 
     def tick(self):
@@ -489,9 +502,22 @@ class FPSController(QObject):
                 self.notify.emit("Nao foi possivel detectar o processo para medir FPS.")
                 self.stop()
             return
+        foreground = pid_foreground()==self.pid
+        if self.prefer_native_rtss:
+            # O RTSS desenha dentro do pipeline 3D do jogo, inclusive fullscreen.
+            # O proprio token <FR> e interpretado pelo RTSS como FPS REAL.
+            if foreground and self.visible_requested:
+                if self.rtss_osd.show():
+                    self.overlay.hide()
+                    return
+            else:
+                self.rtss_osd.hide()
+                self.overlay.hide()
+                return
+        # Fallback nativo, seguro para janela/borderless. Nao garante
+        # sobreposicao sobre modo fullscreen exclusivo.
         value=self.rtss.read(self.pid)
         if value is None:
-            # RTSS, se disponivel, evita a segunda captura ETW.
             if not self._capture_delayed and now-self.started_at>1.5:
                 self.presentmon.start(self.pid)
                 self._capture_delayed=True
@@ -500,11 +526,9 @@ class FPSController(QObject):
         if value is None and now-self.started_at>14 and not self._warned:
             self._warned=True
             self.notify.emit(
-                "FPS indisponivel neste jogo. Verifique permissao de captura ETW "
-                "e modo janela sem bordas.")
+                "FPS indisponivel. Capture ETW bloqueada ou overlay nao suportado.")
         self.overlay.set_fps(value)
-        # Evita cobrir outros aplicativos e o desktop se o jogo perdeu o foco.
-        if self.visible_requested and pid_foreground()==self.pid:
+        if self.visible_requested and foreground:
             self.overlay.position_corner(self.pid)
             if not self.overlay.isVisible():
                 self.overlay.show()
@@ -514,6 +538,7 @@ class FPSController(QObject):
 
     def stop(self):
         self.overlay.hide()
+        self.rtss_osd.close()
         self.presentmon.stop()
         self.hotkey.disable()
         self.game=None
