@@ -1,6 +1,6 @@
 # SuperRender
 
-**SuperRender 0.3 — biblioteca e otimizador experimental de jogos para Windows.**
+**SuperRender 0.3.1 — biblioteca e otimizador experimental de jogos para Windows.**
 
 Aplicativo **nativo em Python + Qt Widgets (PySide6)**. Nao depende de navegador, HTML, React, servidor local nem WebGPU. Suas preferencias e seus jogos ficam **no proprio PC**.
 
@@ -16,7 +16,33 @@ Aplicativo **nativo em Python + Qt Widgets (PySide6)**. Nao depende de navegador
 - Dois interruptores independentes: usar o perfil como principal e pular o dialogo nas proximas aberturas. Marcando "pular dialogo", o perfil escolhido tambem passa a ser o principal.
 - A engrenagem SEMPRE permite mudar a preferencia, mesmo se o Play foi configurado para abertura direta.
 
-## O que os perfis fazem (0.3)
+## FPS em tempo real (0.3.1)
+
+Quando voce inicia **qualquer jogo pelo SuperRender**, o programa tenta localizar o
+processo do jogo e acompanha os quadros **realmente apresentados**, com o FPS
+no canto superior esquerdo. O HUD e uma sobreposicao **nativa e transparente a
+cliques** e nao interrompe os controles do jogo.
+
+- **Ctrl + 7:** alterna mostrar/esconder o contador, mesmo com SuperRender
+  minimizado. A tecla fica reservada somente durante a sessao de jogo.
+- O numero vem de eventos **PresentMon** (ETW) ou, opcionalmente,
+  dos contadores compartilhados do **RTSS se ele ja estiver rodando**.
+- O PresentMon 1.10 (componente de captura open-source de Intel) e
+  **embutido no SuperRender.exe**, sem instalacoes ou downloads manuais.
+  A licenca de redistribuicao esta no arquivo third_party/PresentMon-LICENSE.txt.
+- FPS -- significa **medicao indisponivel ou aguardando o jogo**. Nao
+  significa 0 FPS, nem e um FPS inventado. Se a captura ETW falhar,
+  algumas maquinas precisarao de permissao do Windows para traces.
+- O HUD se esconde quando o jogo sai do foco, e encerra a sessao quando
+  o processo termina. Ele escolhe automaticamente o monitor do jogo.
+- **Limite conhecido:** alguns jogos com tela cheia exclusiva impedem
+  sobreposicoes de outras janelas do Windows. Nesse caso, use o modo
+  janela sem bordas se disponivel. Uma futura camada OSD pode ampliar
+  a compatibilidade sem exigir instalacoes manuais.
+- Jogos com anticheat podem bloquear overlays. O SuperRender nao
+  tenta contornar essa protecao.
+
+## O que os perfis fazem (0.3.1)
 
 | Perfil | Processo Windows | NBA 2K20 | Demais jogos |
 | --- | --- | --- | --- |

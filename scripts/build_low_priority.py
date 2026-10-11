@@ -17,6 +17,8 @@ run([
     "--icon","assets/SuperRender.ico",
     "--add-data","assets/SuperRender.ico;assets",
     "--add-data","assets/SuperRender.png;assets",
+    "--add-data","third_party/PresentMon-1.10.0-x64.exe;third_party",
+    "--add-data","third_party/PresentMon-LICENSE.txt;third_party",
     "--name","SuperRender",
     "--distpath","dist",
     "run.pyw",

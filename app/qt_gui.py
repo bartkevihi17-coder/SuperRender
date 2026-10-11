@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 from .artwork import ensure_art, photo_file
 from .discovery import discover
 from .launcher import launch
+from .fps_overlay import FPSController
 from .library import add_manual, load, save, sync_found, update_game
 from .optimization import (PROFILE_INFO, PROFILE_ORDER, get_adapter, is_running,
                            monitor_and_restore, prepare_game, read_session,
@@ -158,6 +159,8 @@ class MainWindow(QMainWindow):
         self._render_later=QTimer(self);self._render_later.setSingleShot(True)
         self._render_later.setInterval(150);self._render_later.timeout.connect(self.render_cards)
         self._build()
+        self.fps_hud = FPSController(self)
+        self.fps_hud.notify.connect(lambda msg: self.messages.put(("session", msg)))
         self.poll=QTimer(self);self.poll.setInterval(150);self.poll.timeout.connect(self.process_messages)
         self.poll.start()
         QTimer.singleShot(320,self.scan)
@@ -214,7 +217,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.3",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.3.1",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
@@ -588,6 +591,8 @@ class MainWindow(QMainWindow):
                 restore_game(game)
             QMessageBox.critical(self,"Nao foi possivel iniciar",str(error))
             return
+        # O FPS e monitorado sem modificar arquivos do jogo.
+        self.fps_hud.start_game(game)
         if modified:
             threading.Thread(target=monitor_and_restore,
                              args=(dict(game),lambda text:self.messages.put(("session",text))),
@@ -603,6 +608,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self,event):
         self.gradient.timing.stop()
+        self.fps_hud.close()
         self.executor.shutdown(wait=False,cancel_futures=True)
         # Monitoramento de jogo continua so enquanto o programa estiver aberto.
         # Uma sessao pendente sera restaurada no proximo inicio.
