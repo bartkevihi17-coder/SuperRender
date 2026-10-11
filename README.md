@@ -23,7 +23,9 @@ O programa **não promete ganhos fixos de FPS**. Adaptações gráficas são esp
 
 Você pode escolher um perfil principal e marcar **abrir sem perguntar novamente**. A engrenagem permite alterar essa escolha depois.
 
-**Render (Beta):** nova quinta opcao disponivel no seletor, com suporte a perfil principal e abertura automatica. Este modo ainda esta em desenvolvimento: por enquanto inicia o jogo como Normal, sem aplicar otimizacoes adicionais nem alterar arquivos graficos.
+**Render (Beta):** quinta opcao experimental com um planejador adaptativo real. Antes de iniciar o jogo, o SuperRender inspeciona as capacidades disponiveis e escolhe um dos caminhos da arquitetura hibrida: **integrado**, **externo** ou **leve**. A decisao e registrada em `%LOCALAPPDATA%\\SuperRender\\render_sessions` junto com campos separados para FPS base, FPS apresentado, custo do motor e latencia. Os backends nativos de reconstrucao e geracao de quadros ainda estao em desenvolvimento; o programa nao inventa FPS nem afirma que gerou quadros quando o backend ainda nao existe.
+
+O modo Render mostra um aviso de que e experimental e recomendado para jogos offline. O SuperRender nao tenta contornar anticheat. Jogos reconhecidos como competitivos/protegidos sao direcionados automaticamente ao caminho nao invasivo, salvo futura compatibilidade explicitamente validada.
 
 ## Play e Interromper (0.3.3)
 
@@ -85,6 +87,7 @@ O arquivo compilado também está no repositório em `dist/SuperRender.exe`. Se 
 - `app/fps_overlay.py`: atalho global Ctrl + 7, captura e overlay Qt.
 - `app/rtss_backend.py`: integração exclusiva do nosso código com OSD RTSS e provisionamento opcional via WinGet.
 - `app/optimization.py`: perfis específicos, backups e restauração.
+- `app/render_engine.py`: planejamento adaptativo do Render Beta, selecao de backend e registro de metricas.
 - `app/discovery.py`, `app/artwork.py`, `app/library.py`, `app/launcher.py`: descoberta, imagens, persistência e execução.
 - `tests/`: testes que não abrem jogos.
 - `third_party/PresentMon-LICENSE.txt`: aviso de licença do PresentMon redistribuído.
