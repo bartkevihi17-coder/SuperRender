@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 from .artwork import ensure_art, photo_file
 from .discovery import discover
 from .launcher import launch
+from .render_engine import prepare_render, plan_summary
 from .fps_overlay import FPSController, find_pid_for_executable
 from .game_process import (
     stop_gracefully, force_terminate_verified, is_exact_process_alive,
@@ -687,6 +688,25 @@ class MainWindow(QMainWindow):
         # Primeiro resolve o backup pendente, antes de alterar mais arquivos.
         if not self.resolve_pending_backup(game):
             return
+
+        render_plan=None
+        if mode=="render":
+            QMessageBox.information(
+                self,"SuperRender | Render (Beta)",
+                "Render (Beta) e experimental. Para evitar conflitos com anticheat e "
+                "regras de jogos competitivos, recomendamos usa-lo em jogos offline.\n\n"
+                "O SuperRender nao tenta contornar anticheat. O planejador escolhe "
+                "automaticamente o caminho mais seguro disponivel para este jogo."
+            )
+            try:
+                render_plan=prepare_render(game)
+            except Exception as error:
+                QMessageBox.warning(
+                    self,"SuperRender | Render (Beta)",
+                    "Nao foi possivel preparar o plano adaptativo: "+str(error)
+                )
+                return
+
         try:
             modified=prepare_game(game,mode)
         except Exception as error:
@@ -713,6 +733,7 @@ class MainWindow(QMainWindow):
             "game":dict(game),"state":"starting","pid":None,
             "seen":False,"misses":0,"started":time.monotonic(),
             "stopping":False,
+            "render_plan":render_plan,
         }
         self._update_card_state(ident,"starting")
         self.fps_hud.start_game(game)
@@ -723,7 +744,13 @@ class MainWindow(QMainWindow):
                       lambda text:self.messages.put(("session",text))),
                 daemon=True,name="sr-restore-monitor",
             ).start()
-        self.show_toast(PROFILE_INFO[mode]["title"],shortened(answer,100))
+        if render_plan is not None:
+            self.show_toast(
+                "Render Beta · "+render_plan.label,
+                shortened(plan_summary(render_plan),130),
+            )
+        else:
+            self.show_toast(PROFILE_INFO[mode]["title"],shortened(answer,100))
         if mode not in ("normal","light","render") and not get_adapter(game):
             self.show_toast("Sem adaptador grafico",
                             "Este jogo ainda nao possui ajustes graficos especificos.")
