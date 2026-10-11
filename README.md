@@ -1,6 +1,6 @@
 # SuperRender
 
-**v0.3.4 · Biblioteca de jogos e laboratório de desempenho para Windows**
+**v0.4.0 · Biblioteca de jogos e laboratório de desempenho para Windows**
 
 Aplicativo nativo escrito em Python e Qt (PySide6). Não depende de navegador, HTML, WebGPU ou servidor local. Jogos, favoritos e preferências são armazenados somente no computador do usuário, em `%LOCALAPPDATA%\SuperRender`.
 
