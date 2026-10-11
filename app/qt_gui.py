@@ -271,7 +271,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.3.4",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.4.0",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
