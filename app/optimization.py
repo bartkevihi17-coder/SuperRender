@@ -38,10 +38,11 @@ PROFILE_INFO = {
     },
     "render": {
         "title": "Render (Beta)",
-        "sub": "Em desenvolvimento",
+        "sub": "Motor adaptativo experimental",
         "accent": "#f6cb87",
-        "details": "Reservado para nosso futuro sistema de renderizacao. "
-                   "Por enquanto inicia o jogo normalmente, sem novos ajustes ou promessas de FPS."
+        "details": "Analisa o jogo e o hardware para escolher automaticamente entre "
+                   "caminho integrado, externo ou leve. A infraestrutura esta ativa; "
+                   "os backends de reconstrucao e geracao de quadros ainda estao em desenvolvimento."
     },
 }
 
