@@ -74,7 +74,10 @@ def sync_found(existing: list[dict], discovered: list[dict]) -> list[dict]:
             by_location.add((loc, normalized))
         entry = dict(found)
         before = old.get(ident, {})
-        entry.update({k: before[k] for k in ("favorite", "hidden", "last_played") if k in before})
+        entry.update({k: before[k] for k in (
+            "favorite", "hidden", "last_played", "default_profile",
+            "profile_is_default", "skip_profile_dialog",
+        ) if k in before})
         entry["available"] = True
         dedup.append(entry)
 

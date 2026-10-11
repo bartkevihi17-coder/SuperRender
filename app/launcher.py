@@ -16,6 +16,7 @@ from ctypes import wintypes
 from .library import played
 
 ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+HIGH_PRIORITY_CLASS = 0x00000080
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_SET_INFORMATION = 0x0200
 BLOCKED_PROTECTED_GAMES = ("valorant", "fortnite", "league of legends")
@@ -36,16 +37,16 @@ def _change_priority(handle, value: int) -> bool:
         return False
 
 
-def _priority_direct(process: subprocess.Popen) -> bool:
+def _priority_direct(process: subprocess.Popen, priority=ABOVE_NORMAL_PRIORITY_CLASS) -> bool:
     if os.name != "nt":
         return False
     try:
-        return _change_priority(int(process._handle), ABOVE_NORMAL_PRIORITY_CLASS)
+        return _change_priority(int(process._handle), priority)
     except (AttributeError, OSError, ValueError):
         return False
 
 
-def _matching_process(exe: Path):
+def _matching_process(exe: Path, require_set=False):
     """Localiza processo pelo caminho completo, evitando afetar outros jogos."""
     if os.name != "nt" or not exe.is_file():
         return None
@@ -65,7 +66,8 @@ def _matching_process(exe: Path):
         if not pid:
             continue
         handle = kernel.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION,
+            (PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_INFORMATION)
+            if require_set else PROCESS_QUERY_LIMITED_INFORMATION,
             False, int(pid),
         )
         if not handle:
@@ -79,13 +81,13 @@ def _matching_process(exe: Path):
     return None
 
 
-def _watch_priority(exe: Path, notify=None):
+def _watch_priority(exe: Path, notify=None, priority=ABOVE_NORMAL_PRIORITY_CLASS):
     """Aguarda ate o jogo aparecer (launchers retornam imediatamente)."""
     if not exe.is_file():
         return
     handle = None
     for _ in range(75):
-        handle = _matching_process(exe)
+        handle = _matching_process(exe, require_set=True)
         if handle:
             break
         time.sleep(1)
@@ -95,7 +97,7 @@ def _watch_priority(exe: Path, notify=None):
         return
     kernel = ctypes.windll.kernel32
     old_priority = kernel.GetPriorityClass(handle)
-    changed = _change_priority(handle, ABOVE_NORMAL_PRIORITY_CLASS)
+    changed = _change_priority(handle, priority)
     if notify:
         notify("Prioridade do jogo elevada temporariamente." if changed
                else "Jogo iniciado; Windows recusou mudar a prioridade.")
@@ -111,7 +113,7 @@ def _watch_priority(exe: Path, notify=None):
 
 
 def launch(game: dict, mode: str, notify=None) -> str:
-    if mode not in ("normal", "optimized"):
+    if mode not in ("normal", "light", "optimized", "potato"):
         raise ValueError("Modo de inicializacao desconhecido.")
     if os.name != "nt":
         raise RuntimeError("Inicializacao de jogos Windows requer Windows.")
@@ -123,6 +125,7 @@ def launch(game: dict, mode: str, notify=None) -> str:
 
     exe_to_monitor = Path(str(game.get("exe") or ""))
     eligible = eligible_for_priority(game)
+    priority = HIGH_PRIORITY_CLASS if mode == "potato" else ABOVE_NORMAL_PRIORITY_CLASS
 
     if kind == "uri":
         if not (target.startswith("steam://rungameid/") and target[18:].isdigit()
@@ -148,10 +151,10 @@ def launch(game: dict, mode: str, notify=None) -> str:
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         # Nao mexe na prioridade do Riot Client, apenas do executavel do jogo.
-        if mode == "optimized" and eligible and exe_to_monitor.is_file() and (
+        if mode != "normal" and eligible and exe_to_monitor.is_file() and (
             os.path.normcase(str(executable)) == os.path.normcase(str(exe_to_monitor))
         ):
-            if _priority_direct(process):
+            if _priority_direct(process, priority):
                 result = "Jogo iniciado com prioridade acima do normal."
             else:
                 result = "Jogo iniciado; Windows nao permitiu elevar prioridade."
@@ -161,13 +164,13 @@ def launch(game: dict, mode: str, notify=None) -> str:
         raise ValueError("Tipo de jogo nao reconhecido.")
 
     played(game["id"])
-    if mode == "optimized":
+    if mode != "normal":
         if not eligible:
             result += " Otimizacoes de processo desativadas para jogos com anticheat."
         elif exe_to_monitor.is_file() and (kind in ("uri", "shortcut") or
                                            os.path.normcase(target) != os.path.normcase(str(exe_to_monitor))):
             threading.Thread(
-                target=_watch_priority, args=(exe_to_monitor, notify),
+                target=_watch_priority, args=(exe_to_monitor, notify, priority),
                 daemon=True, name="sr-priority-watch",
             ).start()
             result += " Aguardando executavel do jogo para aplicar prioridade."
