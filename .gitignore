@@ -1,7 +1,17 @@
+# Dados pessoais, caches, builds e credenciais nunca vao para o repositorio.
 __pycache__/
 *.py[cod]
 *.log
 *.tmp
 .venv/
 .env
+.env.*
 local-data/
+library.json
+art/
+build/
+dist/
+*.spec
+.pytest_cache/
+.vscode/
+.idea/
