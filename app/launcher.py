@@ -113,8 +113,11 @@ def _watch_priority(exe: Path, notify=None, priority=ABOVE_NORMAL_PRIORITY_CLASS
 
 
 def launch(game: dict, mode: str, notify=None) -> str:
-    if mode not in ("normal", "light", "optimized", "potato"):
+    if mode not in ("normal", "light", "optimized", "potato", "render"):
         raise ValueError("Modo de inicializacao desconhecido.")
+    # Render (Beta) is a placeholder only: use the unchanged launch path.
+    if mode == "render":
+        mode = "normal"
     if os.name != "nt":
         raise RuntimeError("Inicializacao de jogos Windows requer Windows.")
     kind = game.get("kind")

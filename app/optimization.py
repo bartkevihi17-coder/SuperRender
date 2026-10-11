@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .library import APP_DATA
 
-PROFILE_ORDER = ("normal", "light", "optimized", "potato")
+PROFILE_ORDER = ("normal", "light", "optimized", "potato", "render")
 PROFILE_INFO = {
     "normal": {
         "title": "Normal", "sub": "Do jeito que voce configurou", "accent": "#c8ceda",
@@ -35,7 +35,14 @@ PROFILE_INFO = {
     "potato": {
         "title": "Potato", "sub": "Desempenho acima dos graficos", "accent": "#ffad74",
         "details": "Para NBA 2K20: 640x480 (4:3), qualidade minima. Imagem pode ficar bem borrada."
-    }
+    },
+    "render": {
+        "title": "Render (Beta)",
+        "sub": "Em desenvolvimento",
+        "accent": "#f6cb87",
+        "details": "Reservado para nosso futuro sistema de renderizacao. "
+                   "Por enquanto inicia o jogo normalmente, sem novos ajustes ou promessas de FPS."
+    },
 }
 
 _SESSIONS = APP_DATA / "sessions"
@@ -90,7 +97,7 @@ def supports_graphic_profile(game: dict) -> bool:
 def profile_changes(game: dict, profile: str, current: dict) -> dict:
     if profile not in PROFILE_INFO:
         raise ValueError("Perfil de otimizacao invalido.")
-    if profile == "normal" or not supports_graphic_profile(game):
+    if profile in ("normal", "render") or not supports_graphic_profile(game):
         return {}
     if profile == "light":
         # Conservador: evita modificar resolucao, torcida e detalhes que
@@ -250,7 +257,7 @@ def restore_game(game: dict, force: bool = False) -> str:
 def prepare_game(game: dict, profile: str) -> dict | None:
     """Cria backup antes de modificar, e registra sessao persistente para recuperacao."""
     with _LOCK:
-        if profile == "normal":
+        if profile in ("normal", "render"):
             return None
         if not supports_graphic_profile(game):
             return None

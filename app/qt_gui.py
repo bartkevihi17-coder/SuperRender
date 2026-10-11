@@ -270,7 +270,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.3.3",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.3.4",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
@@ -724,7 +724,7 @@ class MainWindow(QMainWindow):
                 daemon=True,name="sr-restore-monitor",
             ).start()
         self.show_toast(PROFILE_INFO[mode]["title"],shortened(answer,100))
-        if mode not in ("normal","light") and not get_adapter(game):
+        if mode not in ("normal","light","render") and not get_adapter(game):
             self.show_toast("Sem adaptador grafico",
                             "Este jogo ainda nao possui ajustes graficos especificos.")
         self.gradient.timing.stop()

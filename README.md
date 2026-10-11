@@ -1,6 +1,6 @@
 # SuperRender
 
-**v0.3.3 · Biblioteca de jogos e laboratório de desempenho para Windows**
+**v0.3.4 · Biblioteca de jogos e laboratório de desempenho para Windows**
 
 Aplicativo nativo escrito em Python e Qt (PySide6). Não depende de navegador, HTML, WebGPU ou servidor local. Jogos, favoritos e preferências são armazenados somente no computador do usuário, em `%LOCALAPPDATA%\SuperRender`.
 
@@ -10,7 +10,7 @@ O SuperRender procura automaticamente jogos da Steam, Epic Games, GOG, Riot Game
 
 A interface traz um menu recolhível, busca, galeria de destaques, notificações e abertura animada com a figurinha centralizada. Cada card tem **Play** e uma **engrenagem** para configurar o modo de inicialização.
 
-## Quatro perfis
+## Cinco perfis
 
 | Perfil | NBA 2K20 | Outros jogos |
 | --- | --- | --- |
@@ -22,6 +22,8 @@ A interface traz um menu recolhível, busca, galeria de destaques, notificaçõe
 O programa **não promete ganhos fixos de FPS**. Adaptações gráficas são específicas de cada jogo. O NBA 2K20 usa seu arquivo `VideoSettings.cfg`, sempre com cópia de segurança e restauração verificável. Jogos com anticheat não recebem alterações automáticas de prioridade.
 
 Você pode escolher um perfil principal e marcar **abrir sem perguntar novamente**. A engrenagem permite alterar essa escolha depois.
+
+**Render (Beta):** nova quinta opcao disponivel no seletor, com suporte a perfil principal e abertura automatica. Este modo ainda esta em desenvolvimento: por enquanto inicia o jogo como Normal, sem aplicar otimizacoes adicionais nem alterar arquivos graficos.
 
 ## Play e Interromper (0.3.3)
 

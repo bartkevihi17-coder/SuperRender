@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QGuiApplication
 from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QLabel,
-                                QPushButton, QVBoxLayout, QWidget)
+                                QPushButton, QScrollArea, QSizePolicy,
+                                QVBoxLayout, QWidget)
 
 from .optimization import PROFILE_INFO, PROFILE_ORDER, supports_graphic_profile
 from .ui_widgets import P, SquishSwitch, label, make_button
@@ -17,21 +18,21 @@ class ProfileRow(QFrame):
         self.ident = ident
         self.selected = False
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(92)
+        self.setFixedHeight(72)
         self.setObjectName("profileChoice")
         self.setAttribute(Qt.WA_StyledBackground, True)
         info = PROFILE_INFO[ident]
         row = QHBoxLayout(self)
-        row.setSpacing(13); row.setContentsMargins(17,11,16,11)
+        row.setSpacing(11); row.setContentsMargins(15,7,14,7)
         self.glyph = QLabel("◯")
         font = QFont("Segoe UI", 17)
         self.glyph.setFont(font)
         self.glyph.setFixedWidth(26)
         self.glyph.setStyleSheet(f"color:{info['accent']};background:transparent;")
         row.addWidget(self.glyph)
-        col=QVBoxLayout();col.setSpacing(4)
-        title=label(info["title"], 12, "ink",True)
-        desc=label(info["sub"],10,"muted")
+        col=QVBoxLayout();col.setSpacing(3)
+        title=label(info["title"], 11, "ink",True)
+        desc=label(info["sub"],9,"muted")
         col.addWidget(title);col.addWidget(desc)
         row.addLayout(col,1)
         self.badge=label("",9,"accent",True)
@@ -78,7 +79,7 @@ class ProfileDialog(QDialog):
         self.selected=game.get("default_profile","normal")
         if self.selected not in PROFILE_ORDER:self.selected="normal"
         root=QVBoxLayout(self)
-        root.setContentsMargins(30,24,30,23);root.setSpacing(12)
+        root.setContentsMargins(27,17,27,17);root.setSpacing(9)
 
         header=label("COMO DESEJA JOGAR?",11,"accent",True)
         root.addWidget(header)
@@ -88,12 +89,34 @@ class ProfileDialog(QDialog):
         desc.setWordWrap(True);root.addWidget(desc)
         root.addSpacing(5)
 
+        self.list_panel=QScrollArea(self)
+        self.list_panel.setFrameShape(QFrame.NoFrame)
+        self.list_panel.setWidgetResizable(True)
+        self.list_panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list_panel.setStyleSheet(
+            "QScrollArea{border:0;background:transparent;}"
+            "QScrollArea QWidget{background:transparent;}"
+            "QScrollBar:vertical{background:#17192c;width:7px;}"
+            "QScrollBar::handle:vertical{background:#615774;border-radius:3px;}"
+        )
+        list_body=QWidget()
+        list_layout=QVBoxLayout(list_body)
+        list_layout.setSpacing(8)
+        list_layout.setContentsMargins(2,2,10,2)
         self.rows={}
         for ident in PROFILE_ORDER:
             card=ProfileRow(ident)
             card.activated.connect(self.select)
             self.rows[ident]=card
-            root.addWidget(card)
+            list_layout.addWidget(card)
+        self.list_panel.setWidget(list_body)
+        self.list_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Reserve enough room for the fixed footer, even at 1366x768.
+        screen = QGuiApplication.primaryScreen()
+        usable = screen.availableGeometry().height() if screen else 800
+        natural_rows = len(PROFILE_ORDER)*72 + max(0,len(PROFILE_ORDER)-1)*8 + 6
+        self.list_panel.setFixedHeight(min(natural_rows,max(190,usable-375)))
+        root.addWidget(self.list_panel,1)
 
         self.explainer=label("",10,"muted")
         self.explainer.setWordWrap(True)
@@ -147,7 +170,7 @@ class ProfileDialog(QDialog):
             row.selected=ident==profile
             row._paint_selection()
         explanation=PROFILE_INFO[profile]["details"]
-        if profile not in ("normal","light") and not supports_graphic_profile(self.game):
+        if profile not in ("normal","light","render") and not supports_graphic_profile(self.game):
             explanation=(
                 "Este jogo ainda nao possui adaptador grafico no SuperRender. "
                 "O perfil aplica apenas prioridade de processo; nao altera a resolucao "
