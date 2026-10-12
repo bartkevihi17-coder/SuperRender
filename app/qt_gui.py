@@ -868,9 +868,7 @@ class MainWindow(QMainWindow):
                                 if self.fps_hud.game
                                 and self.fps_hud.game.get("id")==ident else None)
                             self.live_metrics.update_data(
-                                time.monotonic(), real_fps=real_sample, telemetry=telemetry,
-                                real_interval_ms=(1000.0/real_sample
-                                    if isinstance(real_sample,(int,float)) and real_sample>0 else None))
+                                time.monotonic(), real_fps=real_sample, telemetry=telemetry)
                             capture=telemetry.get("capture_fps")
                             presented=telemetry.get("presented_fps")
                             generated_fps=telemetry.get("generated_fps")
