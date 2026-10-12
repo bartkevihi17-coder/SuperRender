@@ -3,12 +3,12 @@
 Quality-first rule:
 - Render never applies the Potato/Optimized graphics reductions.
 - A pending SuperRender graphics session is restored before Render starts.
-- Real frame generation is preferred when the bundled DX11 backend is
-  available and the game is a verified x64 executable.
+- Real frame generation is preferred through a separate Windows Graphics
+  Capture/D3D11 helper; no DLL is injected into the game.
 - Protected/competitive titles stay on the non-invasive path by default.
 
-The native backend is intentionally experimental and offline-oriented. No
-anticheat bypass is attempted.
+The native backend is intentionally experimental and offline-oriented. It
+captures a game window externally and does not attempt any anticheat bypass.
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ class RenderPlan:
     def label(self) -> str:
         names = {
             "integrated": "Integrado",
-            "dx11-framegen": "FrameGen DX11",
+            "external-framegen": "FrameGen Externo",
             "external": "Externo",
             "light": "Leve",
         }
@@ -128,7 +128,7 @@ def choose_plan(game: dict, caps: RenderCapabilities | None = None) -> RenderPla
     if caps.protected_hint:
         return RenderPlan(
             "light", "preserve-native", "off", 1, False,
-            "Jogo com indicio de protecao/online: nenhuma injecao e nenhum bypass de anticheat.",
+            "Jogo com indicio de protecao/online: Render experimental desativado por politica de seguranca.",
             caps.gpu_name,
         )
 
@@ -141,8 +141,8 @@ def choose_plan(game: dict, caps: RenderCapabilities | None = None) -> RenderPla
 
     if caps.framegen_available:
         return RenderPlan(
-            "dx11-framegen", "preserve-native", "adaptive-2x-4x", 4, True,
-            "Backend DX11 x64 disponivel; o jogo mantem seus graficos e o motor cria frames intermediarios.",
+            "external-framegen", "motion-block-adaptive", "adaptive-to-target", 4, True,
+            "Backend externo WGC/D3D11 disponivel; captura a janela sem injetar DLL e cria frames intermediarios.",
             caps.gpu_name,
         )
 
@@ -175,11 +175,13 @@ def record_plan(game: dict, plan: RenderPlan) -> Path:
         "game_id": game.get("id"),
         "game_name": game.get("name"),
         "exe": game.get("exe"),
-        "quality_policy": "preserve-native",
+        "quality_policy": "high-adapter-or-preserve",
         "plan": asdict(plan),
         "metrics": {
             "base_fps": None,
             "presented_fps": None,
+            "capture_fps": None,
+            "generated_fps": None,
             "generated_between": None,
             "engine_cost_ms": None,
             "latency_ms": None,
@@ -215,7 +217,7 @@ def prepare_render(game: dict) -> RenderPlan:
 def plan_summary(plan: RenderPlan) -> str:
     parts = [
         f"Render Beta: {plan.label}",
-        "qualidade nativa preservada",
+        "qualidade alta quando ha adaptador; senao preservada",
         f"geracao {plan.frame_generation}",
     ]
     if plan.gpu_name:
