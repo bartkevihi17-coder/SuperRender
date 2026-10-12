@@ -35,6 +35,7 @@ from .optimization import (PROFILE_INFO, PROFILE_ORDER, get_adapter, is_running,
                            restore_game, restore_stale_sessions,
                            pending_backup_status, accept_current_config)
 from .ui_dialogs import ProfileDialog
+from .ui_theme import LAUNCH_STATES
 from .ui_widgets import (
     P, FeaturedAccordion, Grainient, SidebarItem, SplashOverlay, SwipeToast,
     color, label, make_button,
@@ -54,7 +55,7 @@ def style_app(app:QApplication):
         QFrame#sidebar{{background:{P["base"]};border-right:1px solid {P["stroke"]};}}
         QFrame#gameCard{{background:{P["panel"]};border:1px solid {P["stroke"]};
             border-radius:14px;}}
-        QFrame#gameCard:hover{{border:1px solid #8f77bf;background:#201d33;}}
+        QFrame#gameCard:hover{{border:1px solid {P["accent"]};background:{P["panel2"]};}}
         QLabel{{background:transparent;}}
         QLineEdit{{background:{P["panel"]};color:{P["ink"]};border:1px solid
             {P["stroke"]};border-radius:11px;padding:11px 15px;selection-background-color:{P["accent"]};}}
@@ -120,11 +121,19 @@ class GameCard(QFrame):
             profile=PROFILE_INFO.get(game["default_profile"],PROFILE_INFO["normal"])
             subtitle=profile["title"]
         else: subtitle="Escolher modo ao iniciar"
+        badges=QHBoxLayout()
+        badges.setSpacing(6)
+        badge=label("● "+shortened(subtitle,19),8,"accent",True)
+        badges.addWidget(badge)
+        if get_adapter(game):
+            badges.addWidget(label("✓ ADAPTER",8,"muted",True))
+        badges.addStretch(1)
+        info.addLayout(badges)
         sub=label(shortened(subtitle,35),9,"muted")
         info.addWidget(sub)
         row=QHBoxLayout()
         row.setSpacing(8)
-        self.play=make_button("▶   PLAY",filled=True)
+        self.play=make_button("▶  JOGAR · PRONTO",filled=True)
         self.play.setMinimumHeight(41)
         self.launch_state="idle"
         self.play.clicked.connect(self.on_action)
@@ -150,26 +159,26 @@ class GameCard(QFrame):
             return
         self.launch_state=state
         if state=="running":
-            self.play.setText("■   INTERROMPER")
+            self.play.setText(LAUNCH_STATES["running"][0])
             self.play.setEnabled(True)
             self.play.setStyleSheet(
                 "QPushButton{background:#853848;color:#ffffff;border:0;"
                 "border-radius:9px;font-weight:700;padding:8px 10px;}"
                 "QPushButton:hover{background:#b44257;}")
         elif state=="stopping":
-            self.play.setText("■  ENCERRANDO...")
+            self.play.setText(LAUNCH_STATES["stopping"][0])
             self.play.setEnabled(False)
             self.play.setStyleSheet(
                 "QPushButton{background:#58404a;color:#d8b0bb;border:0;"
                 "border-radius:9px;font-weight:700;}")
         elif state=="starting":
-            self.play.setText("◌   INICIANDO...")
+            self.play.setText(LAUNCH_STATES["starting"][0])
             self.play.setEnabled(False)
             self.play.setStyleSheet(
                 "QPushButton{background:#343042;color:#aca3c2;border:0;"
                 "border-radius:9px;font-weight:700;}")
         else:
-            self.play.setText("▶   PLAY")
+            self.play.setText(LAUNCH_STATES["idle"][0])
             self.play.setEnabled(True)
             self.play.setStyleSheet("")
 
