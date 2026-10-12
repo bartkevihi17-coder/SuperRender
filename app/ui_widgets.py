@@ -22,12 +22,9 @@ from PySide6.QtWidgets import (QAbstractButton, QFrame, QGraphicsBlurEffect,
                                 QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                 QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
-P = {
-    "bg": "#090b16", "base": "#101324", "panel": "#17192c",
-    "panel2": "#21243a", "stroke": "#32354b", "ink": "#f6f0ff",
-    "muted": "#a39fb8", "accent": "#c3a1ff", "pink": "#ff9ffc",
-    "mint": "#98efe2", "warm": "#ffc88c", "dark": "#10101c",
-}
+from .ui_theme import PALETTE
+
+P = dict(PALETTE)
 
 def color(name: str, alpha: int | None = None) -> QColor:
     col = QColor(P.get(name, name))
