@@ -151,7 +151,7 @@ def launch(game: dict, mode: str, notify=None) -> str:
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         # Nao mexe na prioridade do Riot Client, apenas do executavel do jogo.
-        if mode != "normal" and eligible and exe_to_monitor.is_file() and (
+        if mode in ("light", "optimized", "potato") and eligible and exe_to_monitor.is_file() and (
             os.path.normcase(str(executable)) == os.path.normcase(str(exe_to_monitor))
         ):
             if _priority_direct(process, priority):
@@ -164,7 +164,7 @@ def launch(game: dict, mode: str, notify=None) -> str:
         raise ValueError("Tipo de jogo nao reconhecido.")
 
     played(game["id"])
-    if mode != "normal":
+    if mode in ("light", "optimized", "potato"):
         if not eligible:
             result += " Otimizacoes de processo desativadas para jogos com anticheat."
         elif exe_to_monitor.is_file() and (kind in ("uri", "shortcut") or
