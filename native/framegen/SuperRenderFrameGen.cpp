@@ -3,6 +3,7 @@
 #include <dwmapi.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
+#include <dxgi1_2.h>
 #include <d3dcompiler.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
@@ -66,6 +67,9 @@ struct Options {
     std::filesystem::path csv;
     std::filesystem::path benchmarkOutput;
     int benchmarkSeconds = 0;
+    double minBaseFps = 20.0;
+    double budgetFraction = 0.25;
+    int gpuPriority = -2;
 };
 
 struct Params {
@@ -501,6 +505,9 @@ public:
             return false;
         }
         m_winrtDevice = inspectable.as<direct3d11::IDirect3DDevice>();
+        ComPtr<IDXGIDevice2> priorityDevice;
+        if (SUCCEEDED(m_device.As(&priorityDevice)))
+            m_gpuPriorityResult = priorityDevice->SetGPUThreadPriority(m_options.gpuPriority);
 
         auto interop = winrt::get_activation_factory<capture::GraphicsCaptureItem,
                                                      IGraphicsCaptureItemInterop>();
@@ -606,14 +613,26 @@ private:
         desc.SampleDesc.Count = 1;
         desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         desc.BufferCount = 2;
+        desc.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         desc.Scaling = DXGI_SCALING_STRETCH;
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         HRESULT hr = factory->CreateSwapChainForHwnd(
             m_device.Get(), m_overlay, &desc, nullptr, nullptr, &m_swapChain);
         if (FAILED(hr)) {
+            desc.Flags = 0;
+            hr = factory->CreateSwapChainForHwnd(
+                m_device.Get(), m_overlay, &desc, nullptr, nullptr, &m_swapChain);
+        }
+        if (FAILED(hr)) {
             error = L"Could not create output swap chain: " + ErrorText(hr);
             return false;
+        }
+        ComPtr<IDXGISwapChain2> waitable;
+        if (SUCCEEDED(m_swapChain.As(&waitable))) {
+            waitable->SetMaximumFrameLatency(1);
+            if (desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
+                m_frameWait = waitable->GetFrameLatencyWaitableObject();
         }
         factory->MakeWindowAssociation(m_overlay, DXGI_MWA_NO_ALT_ENTER);
         hr = m_swapChain->GetBuffer(0, IID_PPV_ARGS(&m_swapBuffer));
@@ -1069,6 +1088,35 @@ private:
                      SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
 
+    void AdjustController(double captureFps) {
+        if (captureFps < 1.0) { m_reason = "awaiting_capture"; m_multiplier = 1; return; }
+        if (captureFps < m_options.minBaseFps) {
+            m_multiplier = 1;
+            m_reason = "base_low";
+            return;
+        }
+        int desired = std::clamp((int)std::ceil(m_options.targetFps / captureFps),1,4);
+        const double frameMs = 1000.0 / captureFps;
+        const double costMs = GpuTotal();
+        const double ratio = costMs / std::max(frameMs,1.0);
+        if (ratio > m_options.budgetFraction) {
+            ++m_overBudget;
+            m_underBudget = 0;
+            if (m_overBudget >= 3 && m_tier < 3) { ++m_tier; m_overBudget = 0; }
+            m_reason = "gpu_budget_exceeded";
+        } else if (ratio < m_options.budgetFraction * 0.65) {
+            ++m_underBudget;
+            m_overBudget = 0;
+            if (m_underBudget >= 8 && m_tier > 0) { --m_tier; m_underBudget = 0; }
+            m_reason = m_tier ? "recovering_hysteresis" : "normal";
+        } else {
+            m_underBudget = 0;
+            m_overBudget = 0;
+            m_reason = "budget_hysteresis";
+        }
+        m_multiplier = m_tier >= 3 ? 1 : std::min(desired, m_tier == 2 ? 2 : 4);
+    }
+
     void RenderLoop() {
         using clock = steady_clock;
         const double fps = std::clamp((double)m_options.targetFps, 30.0, 240.0);
@@ -1091,12 +1139,13 @@ private:
                 if (m_haveCurrent) {
                     float factor = 1.0f;
                     bool interpolate = false;
-                    if (m_havePair) {
+                    if (m_havePair && m_multiplier > 1) {
                         double dt = duration<double>(m_currTime - m_prevTime).count();
                         dt = std::clamp(dt, 1.0 / 240.0, 0.12);
                         double elapsed = duration<double>(tickStart - m_currTime).count();
                         factor = (float)std::clamp(elapsed / dt, 0.0, 1.0);
                         interpolate = factor > 0.015f && factor < 0.985f;
+                        if (m_tier >= 3) interpolate = false;
                     }
                     auto gpuStart = clock::now();
                     auto* synthesis = StartPass(2);
@@ -1106,7 +1155,7 @@ private:
                     m_context->CopyResource(m_swapBuffer.Get(), m_output.Get());
                     StopPass(presentCopy);
                     auto* presentQuery = StartPass(4);
-                    HRESULT hr = m_swapChain->Present(0, 0);
+                    HRESULT hr = m_swapChain->Present(1, 0);
                     StopPass(presentQuery);
                     ++m_frameSequence;
                     PollQueries();
@@ -1146,6 +1195,7 @@ private:
                         duration<double>(m_currTime - m_prevTime).count(),
                         1.0 / 240.0, 0.12);
                 }
+                AdjustController(captureFps);
                 WriteCsv("active", captureFps, presentFps, generatedFps);
                 WriteTelemetry("active", captureFps, presentFps, generatedFps,
                                latency, m_lastEngineMs.load());
@@ -1160,7 +1210,12 @@ private:
             next += duration_cast<clock::duration>(period);
             auto current = clock::now();
             if (next < current - milliseconds(50)) next = current;
-            std::this_thread::sleep_until(next);
+            if (m_frameWait) {
+                DWORD wait = WaitForSingleObject(m_frameWait, 15);
+                if (wait != WAIT_OBJECT_0) std::this_thread::sleep_until(next);
+            } else {
+                std::this_thread::sleep_until(next);
+            }
         }
 
         m_running = false;
@@ -1194,6 +1249,11 @@ private:
             << "  \"latency_ms\": " << latencyMs << ",\n"
             << "  \"engine_ms\": " << engineMs << ",\n"
             << "  \"engine_gpu_ms_mean\": " << GpuTotal() << ",\n"
+            << "  \"adaptive_tier\": " << m_tier << ",\n"
+            << "  \"adaptive_multiplier\": " << m_multiplier << ",\n"
+            << "  \"adaptive_reason\": \"" << m_reason << "\",\n"
+            << "  \"gpu_thread_priority_hresult\": " << (long)m_gpuPriorityResult << ",\n"
+            << "  \"waitable_swap_chain\": " << (m_frameWait ? "true" : "false") << ",\n"
             << "  \"wgc_frame_interval_ms_mean\": " << m_wgcIntervals.Mean() << ",\n"
             << "  \"present_interval_ms_mean\": " << m_presentIntervals.Mean() << ",\n"
             << "  \"present_pacing_jitter_ms\": " << m_presentIntervals.Jitter() << ",\n"
@@ -1260,6 +1320,10 @@ private:
     size_t m_nextQuery = 0;
     uint64_t m_frameSequence = 0;
     bool m_queriesReady = false, m_csvHeader = false;
+    HANDLE m_frameWait = nullptr; // Owned by the DXGI swapchain, do not CloseHandle.
+    HRESULT m_gpuPriorityResult = E_NOTIMPL;
+    int m_tier = 0, m_multiplier = 1, m_overBudget = 0, m_underBudget = 0;
+    const char* m_reason = "starting";
     std::mutex m_gpuMutex;
     std::thread m_renderThread;
     std::atomic<bool> m_running{false};
@@ -1310,11 +1374,20 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& out) {
             if (auto v = next()) out.occlusionThreshold=(float)_wtof(v);
         } else if (arg == L"--hud-threshold") {
             if (auto v = next()) out.hudThreshold=(float)_wtof(v);
+        } else if (arg == L"--min-base-fps") {
+            if (auto v=next()) out.minBaseFps=_wtof(v);
+        } else if (arg == L"--budget-fraction") {
+            if (auto v=next()) out.budgetFraction=_wtof(v);
+        } else if (arg == L"--gpu-priority") {
+            if (auto v=next()) out.gpuPriority=_wtoi(v);
         } else if (arg == L"--telemetry") {
             if (auto v = next()) out.telemetry = v;
         }
     }
     out.targetFps = std::clamp(out.targetFps, 30, 240);
+    out.minBaseFps = std::clamp(out.minBaseFps, 5.0, 60.0);
+    out.budgetFraction = std::clamp(out.budgetFraction, 0.05, 0.75);
+    out.gpuPriority = std::clamp(out.gpuPriority,-7,0);
     out.dirtyThreshold = std::clamp(out.dirtyThreshold, 0.001f, 0.5f);
     out.earlyExitThreshold = std::clamp(out.earlyExitThreshold, 0.001f, 0.5f);
     out.occlusionThreshold = std::clamp(out.occlusionThreshold, 0.01f, 1.0f);
