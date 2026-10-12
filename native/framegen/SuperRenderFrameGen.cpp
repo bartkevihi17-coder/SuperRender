@@ -320,9 +320,9 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 
-static constexpr size_t kPasses = 5, kSlots = 128;
+static constexpr size_t kPasses = 6, kSlots = 128;
 static constexpr char const* kPassNames[kPasses] = {
-    "capture_copy", "motion_estimation_l0", "synthesis", "present_copy", "present"
+    "capture_copy", "motion_estimation_l0", "synthesis", "present_copy", "present", "downscale_luma"
 };
 struct PassQuery {
     ComPtr<ID3D11Query> disjoint, start, end;
@@ -603,6 +603,8 @@ private:
         if (FAILED(hr)) return false;
         hr = m_device->CreateShaderResourceView(m_motionPrevious.Get(), &srv, &m_motionPreviousSrv);
         if (FAILED(hr)) return false;
+        m_context->ClearUnorderedAccessViewUint(m_motionUav.Get(), std::array<UINT,4>{0,0,0,0}.data());
+        m_context->CopyResource(m_motionPrevious.Get(), m_motion.Get());
         D3D11_BUFFER_DESC cbd{};
         cbd.ByteWidth = sizeof(Params);
         cbd.Usage = D3D11_USAGE_DYNAMIC;
@@ -784,7 +786,7 @@ private:
             else out << m_passStats[i].Mean() << ", \"p95_ms\": " << m_passStats[i].P95() << "}";
             out << ",";
         }
-        out << "\"downscale_luma\": null, \"vector_refine_filter\": null}";
+        out << "\"vector_refine_filter\": null}";
     }
     void WriteCsv(char const* status, double capture, double presented, double generated) {
         if (m_options.csv.empty()) return;
@@ -794,8 +796,7 @@ private:
             out << "timestamp_unix_ms,status,capture_fps,presented_fps,generated_fps,"
                    "wgc_frame_interval_ms_mean,present_interval_ms_mean,present_pacing_jitter_ms,engine_gpu_ms_mean";
             for (auto name : kPassNames) out << "," << name << "_mean_ms," << name << "_p95_ms";
-            out << ",downscale_luma_mean_ms,downscale_luma_p95_ms,"
-                   "vector_refine_filter_mean_ms,vector_refine_filter_p95_ms\n";
+            out << ",vector_refine_filter_mean_ms,vector_refine_filter_p95_ms\n";
             m_csvHeader = true;
         }
         out << std::fixed << std::setprecision(4)
@@ -807,7 +808,7 @@ private:
             if (pass.v.empty()) out << ",,";
             else out << "," << pass.Mean() << "," << pass.P95();
         }
-        out << ",,,,\n";
+        out << ",,\n";
     }
     void WriteBenchmark(double elapsed, uint64_t captures, uint64_t presents, uint64_t generated) {
         if (m_options.benchmarkOutput.empty()) return;
@@ -863,7 +864,9 @@ private:
                 m_context->CopyResource(m_curr.Get(), texture.get());
                 m_context->CopyResource(m_prev.Get(), texture.get());
                 m_prevTime = m_currTime = now;
+                auto* lumaPass = StartPass(5);
                 DispatchLuma(m_lumaCurrent);
+                StopPass(lumaPass);
                 m_haveCurrent = true;
                 m_havePair = false;
             } else {
@@ -875,7 +878,9 @@ private:
                 StopPass(copyPass);
                 copyPass = nullptr;
                 m_lumaCurrent = 1-m_lumaCurrent;
+                auto* lumaPass = StartPass(5);
                 DispatchLuma(m_lumaCurrent);
+                StopPass(lumaPass);
                 auto* flowPass = StartPass(1);
                 DispatchFlow();
                 StopPass(flowPass);
