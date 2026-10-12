@@ -401,7 +401,12 @@ public:
         }
 
         InitQueries();
-        if (!m_options.csv.empty()) { std::ofstream reset(m_options.csv, std::ios::trunc); }
+        if (!m_options.csv.empty()) {
+            std::error_code ec;
+            auto parent = m_options.csv.parent_path();
+            if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+            std::ofstream reset(m_options.csv, std::ios::trunc);
+        }
         m_running = true;
         WriteTelemetry("starting", 0, 0, 0, 0.0, 0.0);
         m_renderThread = std::thread([this] { RenderLoop(); });
