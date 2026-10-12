@@ -1,4 +1,4 @@
-"""Render Beta is a placeholder UI profile, not a graphics accelerator."""
+"""Render Beta preserves game quality and delegates acceleration to its backend."""
 import json
 import os
 import tempfile
@@ -14,7 +14,7 @@ class RenderBetaTests(unittest.TestCase):
     def test_profile_registered_as_fifth_choice(self):
         self.assertEqual(PROFILE_ORDER[-1], "render")
         self.assertEqual(PROFILE_INFO["render"]["title"],"Render (Beta)")
-        self.assertIn("normalmente",PROFILE_INFO["render"]["details"])
+        self.assertIn("Frame Generation",PROFILE_INFO["render"]["details"])
 
     def test_no_graphics_mutations_even_on_nba(self):
         with tempfile.TemporaryDirectory() as root:
@@ -56,7 +56,7 @@ class RenderBetaTests(unittest.TestCase):
             dialog.select("render")
             self.assertIn("render",dialog.rows)
             self.assertEqual(dialog.selected,"render")
-            self.assertIn("normalmente",dialog.explainer.text())
+            self.assertIn("Frame Generation",dialog.explainer.text())
             dialog.autoplay_switch.setChecked(True)
             settings=dialog.settings()
             self.assertEqual(settings["default_profile"],"render")
