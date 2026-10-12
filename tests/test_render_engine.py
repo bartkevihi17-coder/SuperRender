@@ -20,7 +20,7 @@ class RenderPlannerTests(unittest.TestCase):
         self.assertEqual(plan.target_multiplier, 4)
         self.assertTrue(plan.requires_offline)
 
-    def test_native_dx11_framegen_when_backend_is_available(self):
+    def test_external_framegen_when_backend_is_available(self):
         caps = RenderCapabilities(
             windows=True,
             executable_known=True,
@@ -30,9 +30,9 @@ class RenderPlannerTests(unittest.TestCase):
             framegen_available=True,
         )
         plan = choose_plan({"name": "Offline Game"}, caps)
-        self.assertEqual(plan.backend, "dx11-framegen")
-        self.assertEqual(plan.reconstruction, "preserve-native")
-        self.assertEqual(plan.frame_generation, "adaptive-2x-4x")
+        self.assertEqual(plan.backend, "external-framegen")
+        self.assertEqual(plan.reconstruction, "motion-block-adaptive")
+        self.assertEqual(plan.frame_generation, "adaptive-to-target")
         self.assertTrue(plan.requires_offline)
 
     def test_external_fallback_does_not_fake_generation(self):
