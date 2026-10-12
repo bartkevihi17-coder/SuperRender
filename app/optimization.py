@@ -42,7 +42,7 @@ PROFILE_INFO = {
         "accent": "#f6cb87",
         "details": "Nao aplica Potato/Otimizado. Preserva a configuracao visual restaurada "
                    "e, em jogos Windows x64/DX11 compativeis, mede o FPS real e ativa "
-                   "geracao adaptativa de quadros para mirar 60 FPS. Recomendado offline."
+                   "Frame Generation adaptativo para mirar 60 FPS. Recomendado offline."
     },
 }
 
