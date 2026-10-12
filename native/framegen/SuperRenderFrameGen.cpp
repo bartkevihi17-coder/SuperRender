@@ -56,6 +56,9 @@ struct Options {
     int targetFps = 60;
     int blockSize = 32;
     int searchRadius = 4;
+    int pyramidLevels = 2;
+    float dirtyThreshold = 0.025f;
+    float earlyExitThreshold = 0.018f;
     std::filesystem::path telemetry;
     std::filesystem::path csv;
     std::filesystem::path benchmarkOutput;
@@ -69,8 +72,8 @@ struct Params {
     uint32_t searchRadius;
     float factor;
     float costThreshold;
-    float pad0;
-    float pad1;
+    float dirtyThreshold;
+    float earlyExitThreshold;
 };
 static_assert(sizeof(Params) == 32);
 
@@ -83,7 +86,8 @@ cbuffer Params : register(b0)
     uint SearchRadius;
     float Factor;
     float CostThreshold;
-    float2 Padding;
+    float DirtyThreshold;
+    float EarlyExitThreshold;
 };
 
 Texture2D<float4> PrevTex : register(t0);
@@ -93,59 +97,99 @@ RWStructuredBuffer<float4> MotionOut : register(u0);
 RWTexture2D<float4> OutputTex : register(u1);
 SamplerState LinearClamp : register(s0);
 
-float3 SafeLoad(Texture2D<float4> tex, int2 p)
+
+Texture2D<float> PrevLuma : register(t3);
+Texture2D<float> CurrLuma : register(t4);
+StructuredBuffer<float4> PreviousMotion : register(t5);
+RWTexture2D<float> LumaOut : register(u2);
+
+[numthreads(8,8,1)]
+void LumaDownsample(uint3 id : SV_DispatchThreadID)
 {
-    p = clamp(p, int2(0, 0), int2((int)Width - 1, (int)Height - 1));
-    return tex.Load(int3(p, 0)).rgb;
+    uint w, h;
+    LumaOut.GetDimensions(w, h);
+    if (id.x >= w || id.y >= h) return;
+    uint2 p = id.xy * 2;
+    float3 a = CurrTex.Load(int3(min(p, uint2(Width-1,Height-1)),0)).rgb;
+    float3 b = CurrTex.Load(int3(min(p+uint2(1,0), uint2(Width-1,Height-1)),0)).rgb;
+    float3 c = CurrTex.Load(int3(min(p+uint2(0,1), uint2(Width-1,Height-1)),0)).rgb;
+    float3 d = CurrTex.Load(int3(min(p+uint2(1,1), uint2(Width-1,Height-1)),0)).rgb;
+    LumaOut[id.xy] = dot((a+b+c+d)*0.25, float3(0.2126,0.7152,0.0722));
 }
 
-[numthreads(8, 8, 1)]
+[numthreads(8,8,1)]
+void LumaQuarter(uint3 id : SV_DispatchThreadID)
+{
+    uint w,h;
+    LumaOut.GetDimensions(w,h);
+    if(id.x>=w || id.y>=h) return;
+    uint sw,sh;
+    CurrLuma.GetDimensions(sw,sh);
+    uint2 p = id.xy*2;
+    float v = 0;
+    [unroll] for(uint j=0;j<2;++j)
+      [unroll] for(uint i=0;i<2;++i)
+        v += CurrLuma.Load(int3(min(p+uint2(i,j),uint2(sw-1,sh-1)),0));
+    LumaOut[id.xy]=v*0.25;
+}
+
+// Quarter-resolution diamond search, followed by an explicit +/-1-pixel
+// refinement. Each thread owns one independent block; no inter-group barriers.
+float LumaCost(int2 origin, int2 offset, int2 dims)
+{
+    float sad=0;
+    [unroll] for(int j=0;j<4;++j)
+      [unroll] for(int i=0;i<4;++i)
+      {
+        int2 pos=clamp(origin+int2(i*2,j*2),int2(0,0),dims-1);
+        int2 other=clamp(pos+offset,int2(0,0),dims-1);
+        sad += abs(CurrLuma.Load(int3(pos,0))-PrevLuma.Load(int3(other,0)));
+      }
+    return sad*(1.0/16.0);
+}
+[numthreads(8,8,1)]
 void Flow(uint3 tid : SV_DispatchThreadID)
 {
-    uint blocksX = (Width + BlockSize - 1) / BlockSize;
-    uint blocksY = (Height + BlockSize - 1) / BlockSize;
-    if (tid.x >= blocksX || tid.y >= blocksY) return;
-
-    int2 origin = int2(tid.xy) * (int)BlockSize;
-    int q = max(2, (int)BlockSize / 4);
-    int h = max(2, (int)BlockSize / 2);
-    int tq = max(2, (int)(BlockSize * 3 / 4));
-    int2 samples[5] = {
-        int2(h, h), int2(q, q), int2(tq, q), int2(q, tq), int2(tq, tq)
-    };
-
-    float bestCost = 1e20;
-    int2 bestOffset = int2(0, 0);
-    int r = (int)SearchRadius;
-
-    for (int dy = -r; dy <= r; dy += 2)
-    {
-        for (int dx = -r; dx <= r; dx += 2)
-        {
-            float cost = 0.0;
-            [unroll]
-            for (int s = 0; s < 5; ++s)
-            {
-                int2 cp = origin + samples[s];
-                cp = clamp(cp, int2(0, 0), int2((int)Width - 1, (int)Height - 1));
-                int2 pp = cp + int2(dx, dy);
-                float3 a = SafeLoad(CurrTex, cp);
-                float3 b = SafeLoad(PrevTex, pp);
-                float3 d = a - b;
-                cost += dot(d, d);
-            }
-            cost *= 0.2;
-            if (cost < bestCost)
-            {
-                bestCost = cost;
-                bestOffset = int2(dx, dy);
-            }
-        }
+    uint blocksX=(Width+BlockSize-1)/BlockSize;
+    uint blocksY=(Height+BlockSize-1)/BlockSize;
+    if(tid.x>=blocksX || tid.y>=blocksY) return;
+    uint index=tid.y*blocksX+tid.x;
+    uint w,h; CurrLuma.GetDimensions(w,h);
+    int2 dims=int2(w,h);
+    int2 origin=int2(tid.xy)*int(BlockSize/4);
+    origin=clamp(origin,int2(0,0),dims-1);
+    float dirty=LumaCost(origin,int2(0,0),dims);
+    if(dirty<DirtyThreshold) {
+        MotionOut[index]=float4(0,0,0,1);
+        return;
     }
-
-    uint index = tid.y * blocksX + tid.x;
-    // bestOffset maps current -> previous. Store previous -> current.
-    MotionOut[index] = float4(-(float)bestOffset.x, -(float)bestOffset.y, bestCost, 0.0);
+    float2 old=PreviousMotion[index].xy;
+    int2 best=int2(round(-old/4.0));
+    int r=max(1,int(SearchRadius/4));
+    best=clamp(best,int2(-r,-r),int2(r,r));
+    float score=LumaCost(origin,best,dims);
+    if(score>EarlyExitThreshold) {
+        // Coarse-to-fine diamond steps; avoid exhaustive 2D search.
+        for(int step=max(1,r/2);step>=1;step/=2) {
+            int2 offsets[4]={int2(step,0),int2(-step,0),
+                             int2(0,step),int2(0,-step)};
+            [unroll] for(int c=0;c<4;++c) {
+                int2 trial=clamp(best+offsets[c],int2(-r,-r),int2(r,r));
+                float cost=LumaCost(origin,trial,dims);
+                if(cost<score){ score=cost; best=trial; }
+            }
+            if(step==1) break;
+        }
+        [unroll] for(int y=-1;y<=1;++y)
+          [unroll] for(int x=-1;x<=1;++x) {
+            int2 trial=clamp(best+int2(x,y),int2(-r,-r),int2(r,r));
+            float cost=LumaCost(origin,trial,dims);
+            if(cost<score){score=cost;best=trial;}
+          }
+    }
+    // Motion is stored previous -> current, in full-resolution pixels.
+    float confidence=saturate(1.0-score/max(EarlyExitThreshold*8.0,0.0001));
+    MotionOut[index]=float4(-float2(best)*4.0, score, confidence);
 }
 
 float4 SampleLinear(Texture2D<float4> tex, float2 p)
@@ -533,6 +577,32 @@ private:
         hr = m_device->CreateUnorderedAccessView(m_motion.Get(), &uav, &m_motionUav);
         if (FAILED(hr)) { error = L"Could not create motion UAV."; return false; }
 
+        // R8_UNORM pyramid. Full-color textures remain exclusive to synthesis.
+        D3D11_TEXTURE2D_DESC luma = input;
+        luma.Format = DXGI_FORMAT_R8_UNORM;
+        luma.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+        for (int i = 0; i < 2; ++i) {
+            luma.Width = std::max(1u, (m_width+1)/2);
+            luma.Height = std::max(1u, (m_height+1)/2);
+            hr = m_device->CreateTexture2D(&luma, nullptr, &m_lumaHalf[i]);
+            if (FAILED(hr)) { error = L"Could not allocate R8 half-resolution luma."; return false; }
+            hr = m_device->CreateShaderResourceView(m_lumaHalf[i].Get(), nullptr, &m_lumaHalfSrv[i]);
+            if (FAILED(hr)) return false;
+            hr = m_device->CreateUnorderedAccessView(m_lumaHalf[i].Get(), nullptr, &m_lumaHalfUav[i]);
+            if (FAILED(hr)) return false;
+            luma.Width = std::max(1u, (m_width+3)/4);
+            luma.Height = std::max(1u, (m_height+3)/4);
+            hr = m_device->CreateTexture2D(&luma, nullptr, &m_lumaQuarter[i]);
+            if (FAILED(hr)) { error = L"Could not allocate R8 quarter-resolution luma."; return false; }
+            hr = m_device->CreateShaderResourceView(m_lumaQuarter[i].Get(), nullptr, &m_lumaQuarterSrv[i]);
+            if (FAILED(hr)) return false;
+            hr = m_device->CreateUnorderedAccessView(m_lumaQuarter[i].Get(), nullptr, &m_lumaQuarterUav[i]);
+            if (FAILED(hr)) return false;
+        }
+        hr = m_device->CreateBuffer(&motion, nullptr, &m_motionPrevious);
+        if (FAILED(hr)) return false;
+        hr = m_device->CreateShaderResourceView(m_motionPrevious.Get(), &srv, &m_motionPreviousSrv);
+        if (FAILED(hr)) return false;
         D3D11_BUFFER_DESC cbd{};
         cbd.ByteWidth = sizeof(Params);
         cbd.Usage = D3D11_USAGE_DYNAMIC;
@@ -576,6 +646,8 @@ private:
 
     bool CompileShaders(std::wstring& error) {
         return CompileOne("Flow", m_flowCs, error) &&
+               CompileOne("LumaDownsample", m_lumaCs, error) &&
+               CompileOne("LumaQuarter", m_quarterCs, error) &&
                CompileOne("Interpolate", m_interpCs, error) &&
                CompileOne("CopyCurrent", m_copyCs, error);
     }
@@ -590,29 +662,53 @@ private:
             p->searchRadius = (uint32_t)m_options.searchRadius;
             p->factor = factor;
             p->costThreshold = 0.16f;
-            p->pad0 = p->pad1 = 0.0f;
+            p->dirtyThreshold = m_options.dirtyThreshold;
+            p->earlyExitThreshold = m_options.earlyExitThreshold;
             m_context->Unmap(m_params.Get(), 0);
         }
     }
 
     void Unbind() {
-        ID3D11ShaderResourceView* nullSrv[3] = {};
-        ID3D11UnorderedAccessView* nullUav[2] = {};
-        m_context->CSSetShaderResources(0, 3, nullSrv);
-        m_context->CSSetUnorderedAccessViews(0, 2, nullUav, nullptr);
+        ID3D11ShaderResourceView* nullSrv[6] = {};
+        ID3D11UnorderedAccessView* nullUav[3] = {};
+        m_context->CSSetShaderResources(0, 6, nullSrv);
+        m_context->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
         m_context->CSSetShader(nullptr, nullptr, 0);
+    }
+
+    void DispatchLuma(int target) {
+        UpdateParams(0.0f);
+        ID3D11ShaderResourceView* color = m_currSrv.Get();
+        ID3D11UnorderedAccessView* half = m_lumaHalfUav[target].Get();
+        m_context->CSSetShader(m_lumaCs.Get(), nullptr, 0);
+        m_context->CSSetConstantBuffers(0,1,m_params.GetAddressOf());
+        m_context->CSSetShaderResources(1,1,&color);
+        m_context->CSSetUnorderedAccessViews(2,1,&half,nullptr);
+        m_context->Dispatch(((m_width+1)/2+7)/8,((m_height+1)/2+7)/8,1);
+        Unbind();
+        ID3D11ShaderResourceView* halfSrv=m_lumaHalfSrv[target].Get();
+        ID3D11UnorderedAccessView* quarter=m_lumaQuarterUav[target].Get();
+        m_context->CSSetShader(m_quarterCs.Get(),nullptr,0);
+        m_context->CSSetShaderResources(4,1,&halfSrv);
+        m_context->CSSetUnorderedAccessViews(2,1,&quarter,nullptr);
+        m_context->Dispatch(((m_width+3)/4+7)/8,((m_height+3)/4+7)/8,1);
+        Unbind();
     }
 
     void DispatchFlow() {
         UpdateParams(0.0f);
-        ID3D11ShaderResourceView* srvs[2] = {m_prevSrv.Get(), m_currSrv.Get()};
+        ID3D11ShaderResourceView* srvs[3] = {
+            m_lumaQuarterSrv[1-m_lumaCurrent].Get(),
+            m_lumaQuarterSrv[m_lumaCurrent].Get(), m_motionPreviousSrv.Get()
+        };
         ID3D11UnorderedAccessView* uavs[1] = {m_motionUav.Get()};
         m_context->CSSetShader(m_flowCs.Get(), nullptr, 0);
         m_context->CSSetConstantBuffers(0, 1, m_params.GetAddressOf());
-        m_context->CSSetShaderResources(0, 2, srvs);
+        m_context->CSSetShaderResources(3, 3, srvs);
         m_context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
         m_context->Dispatch((m_blocksX + 7) / 8, (m_blocksY + 7) / 8, 1);
         Unbind();
+        m_context->CopyResource(m_motionPrevious.Get(), m_motion.Get());
     }
 
     void DispatchFrame(float factor, bool interpolate) {
@@ -767,6 +863,7 @@ private:
                 m_context->CopyResource(m_curr.Get(), texture.get());
                 m_context->CopyResource(m_prev.Get(), texture.get());
                 m_prevTime = m_currTime = now;
+                DispatchLuma(m_lumaCurrent);
                 m_haveCurrent = true;
                 m_havePair = false;
             } else {
@@ -777,6 +874,8 @@ private:
                 m_currTime = now;
                 StopPass(copyPass);
                 copyPass = nullptr;
+                m_lumaCurrent = 1-m_lumaCurrent;
+                DispatchLuma(m_lumaCurrent);
                 auto* flowPass = StartPass(1);
                 DispatchFlow();
                 StopPass(flowPass);
@@ -966,6 +1065,12 @@ private:
     ComPtr<ID3D11Buffer> m_motion, m_params;
     ComPtr<ID3D11SamplerState> m_sampler;
     ComPtr<ID3D11ComputeShader> m_flowCs, m_interpCs, m_copyCs;
+    ComPtr<ID3D11ComputeShader> m_lumaCs, m_quarterCs;
+    ComPtr<ID3D11Texture2D> m_lumaHalf[2], m_lumaQuarter[2];
+    ComPtr<ID3D11ShaderResourceView> m_lumaHalfSrv[2], m_lumaQuarterSrv[2];
+    ComPtr<ID3D11UnorderedAccessView> m_lumaHalfUav[2], m_lumaQuarterUav[2];
+    ComPtr<ID3D11Buffer> m_motionPrevious;
+    ComPtr<ID3D11ShaderResourceView> m_motionPreviousSrv;
 
     std::array<PassQuery, kSlots> m_queries{};
     std::array<Samples, kPasses> m_passStats{};
@@ -980,6 +1085,7 @@ private:
     std::atomic<bool> m_resizeDetected{false};
     bool m_haveCurrent = false;
     bool m_havePair = false;
+    int m_lumaCurrent = 0;
     steady_clock::time_point m_prevTime{}, m_currTime{};
 
     std::atomic<uint64_t> m_captureCount{0};
@@ -1010,11 +1116,17 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& out) {
             if (auto v = next()) out.benchmarkSeconds = _wtoi(v);
         } else if (arg == L"--benchmark-output") {
             if (auto v = next()) out.benchmarkOutput = v;
+        } else if (arg == L"--dirty-threshold") {
+            if (auto v = next()) out.dirtyThreshold = (float)_wtof(v);
+        } else if (arg == L"--early-exit-threshold") {
+            if (auto v = next()) out.earlyExitThreshold = (float)_wtof(v);
         } else if (arg == L"--telemetry") {
             if (auto v = next()) out.telemetry = v;
         }
     }
     out.targetFps = std::clamp(out.targetFps, 30, 240);
+    out.dirtyThreshold = std::clamp(out.dirtyThreshold, 0.001f, 0.5f);
+    out.earlyExitThreshold = std::clamp(out.earlyExitThreshold, 0.001f, 0.5f);
     out.blockSize = std::clamp(out.blockSize, 8, 64);
     // Keep an even radius because the lightweight search advances by 2 pixels.
     out.searchRadius = std::clamp(out.searchRadius, 2, 24);
