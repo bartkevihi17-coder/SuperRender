@@ -115,3 +115,34 @@ def load(folder: Path, hardware: FGHardware, *, driver: str,
         return data["winner"]
     except (OSError, ValueError, TypeError, KeyError):
         return None
+
+
+def run_trials(apply, measure, restore, *, duration_seconds: float = 3.0,
+               configurations: tuple[FGConfig, ...] | None = None) -> dict:
+    """Execute sequential trials through a verified external helper controller.
+
+    apply(config) must return True only when all requested GPU parameters are
+    active, including actual pyramid depth and tier; measure(seconds) returns
+    engine_ms, pacing_jitter_ms, wgc_fps, validation_error and samples.
+    No process injection or game-specific logic. Restore always executes.
+    """
+    if not 2.5 <= duration_seconds <= 4.0:
+        raise ValueError("trial duration outside calibration window")
+    configurations = configurations or candidates()
+    if not 3 <= len(configurations) <= 4:
+        raise ValueError("expected three or four sequential configurations")
+    trials = []
+    try:
+        for config in configurations:
+            try:
+                applied = apply(config) is True
+                if not applied:
+                    continue
+                measurements = measure(duration_seconds)
+                trials.append(evaluate(config, applied=True, **measurements))
+            finally:
+                restore()
+        return {"winner": select(trials), "trials": trials,
+                "status": "selected" if select(trials) else "insufficient_evidence"}
+    finally:
+        restore()
