@@ -1,7 +1,7 @@
 import unittest
 
 from app.render_backend import generated_frame_count
-from app.render_engine import RenderCapabilities, choose_plan
+from app.render_engine import RenderCapabilities, choose_plan, _session_path
 
 
 class RenderPlannerTests(unittest.TestCase):
@@ -75,6 +75,17 @@ class RenderPlannerTests(unittest.TestCase):
         plan = choose_plan({"name": "Game"}, caps)
         self.assertEqual(plan.backend, "light")
         self.assertEqual(plan.frame_generation, "off")
+
+
+    def test_session_filename_is_windows_safe_for_shortcut_ids(self):
+        path = _session_path({
+            "id": 'atalho_windows:9c44eff0c0f1e95/with\\bad?chars*<>"|'
+        })
+        self.assertTrue(path.name.startswith("game-"))
+        self.assertTrue(path.name.endswith("-latest.json"))
+        for char in '<>:"/\\|?*':
+            self.assertNotIn(char, path.name)
+        self.assertLess(len(path.name), 80)
 
     def test_generation_ratio_targets_60_without_claiming_real_fps(self):
         self.assertEqual(generated_frame_count(60.0), 0)
