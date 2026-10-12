@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .library import APP_DATA
+from .quality_adapters import has_quality_adapter, render_quality_changes
 
 PROFILE_ORDER = ("normal", "light", "optimized", "potato", "render")
 PROFILE_INFO = {
@@ -40,9 +41,10 @@ PROFILE_INFO = {
         "title": "Render (Beta)",
         "sub": "Qualidade preservada + Frame Generation",
         "accent": "#f6cb87",
-        "details": "Nao aplica Potato/Otimizado. Preserva a configuracao visual restaurada "
-                   "e, em jogos Windows x64/DX11 compativeis, mede o FPS real e ativa "
-                   "Frame Generation adaptativo para mirar 60 FPS. Recomendado offline."
+        "details": "Qualidade primeiro: usa preset alto temporario quando existe um Quality Adapter "
+                   "seguro para o jogo; caso contrario preserva a configuracao atual. Em jogos "
+                   "Windows x64/DX11 compativeis, mede o FPS real e ativa Frame Generation "
+                   "adaptativo para mirar 60 FPS. Recomendado offline."
     },
 }
 
@@ -98,8 +100,10 @@ def supports_graphic_profile(game: dict) -> bool:
 def profile_changes(game: dict, profile: str, current: dict) -> dict:
     if profile not in PROFILE_INFO:
         raise ValueError("Perfil de otimizacao invalido.")
-    if profile in ("normal", "render") or not supports_graphic_profile(game):
+    if profile == "normal" or not supports_graphic_profile(game):
         return {}
+    if profile == "render":
+        return render_quality_changes(get_adapter(game), current)
     if profile == "light":
         # Conservador: evita modificar resolucao, torcida e detalhes que
         # o proprio usuario deseja preservar.
@@ -258,9 +262,11 @@ def restore_game(game: dict, force: bool = False) -> str:
 def prepare_game(game: dict, profile: str) -> dict | None:
     """Cria backup antes de modificar, e registra sessao persistente para recuperacao."""
     with _LOCK:
-        if profile in ("normal", "render"):
+        if profile == "normal":
             return None
         if not supports_graphic_profile(game):
+            return None
+        if profile == "render" and not has_quality_adapter(get_adapter(game)):
             return None
         if is_running(game):
             raise RuntimeError("Feche o jogo antes de aplicar um novo perfil grafico.")
