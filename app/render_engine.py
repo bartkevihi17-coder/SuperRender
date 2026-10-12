@@ -12,6 +12,7 @@ captures a game window externally and does not attempt any anticheat bypass.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -161,8 +162,16 @@ def choose_plan(game: dict, caps: RenderCapabilities | None = None) -> RenderPla
 
 
 def _session_path(game: dict) -> Path:
-    ident = str(game.get("id") or "game").replace("/", "_").replace("\\", "_")
-    return _RENDER_SESSIONS / (ident + "-latest.json")
+    """Return a Windows-safe, stable session filename for any game identifier.
+
+    Library IDs can contain ':' (for example Windows shortcut IDs). On NTFS a
+    colon is interpreted as an alternate data stream, which made os.replace()
+    fail with WinError 87. Hashing the logical ID also avoids every other
+    reserved filename character and excessively long paths.
+    """
+    logical_id = str(game.get("id") or game.get("exe") or game.get("name") or "game")
+    digest = hashlib.sha256(logical_id.encode("utf-8", errors="replace")).hexdigest()[:24]
+    return _RENDER_SESSIONS / f"game-{digest}-latest.json"
 
 
 def record_plan(game: dict, plan: RenderPlan) -> Path:
