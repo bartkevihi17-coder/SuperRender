@@ -15,6 +15,10 @@
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 
 #include <algorithm>
+#include <array>
+#include <deque>
+#include <numeric>
+#include <iomanip>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -53,6 +57,9 @@ struct Options {
     int blockSize = 32;
     int searchRadius = 4;
     std::filesystem::path telemetry;
+    std::filesystem::path csv;
+    std::filesystem::path benchmarkOutput;
+    int benchmarkSeconds = 0;
 };
 
 struct Params {
@@ -268,6 +275,42 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 }
 
+
+static constexpr size_t kPasses = 5, kSlots = 128;
+static constexpr char const* kPassNames[kPasses] = {
+    "capture_copy", "motion_estimation_l0", "synthesis", "present_copy", "present"
+};
+struct PassQuery {
+    ComPtr<ID3D11Query> disjoint, start, end;
+    size_t pass = 0;
+    uint64_t sequence = 0;
+    bool pending = false;
+};
+struct Samples {
+    std::deque<double> v;
+    void Add(double x) {
+        if (!std::isfinite(x) || x < 0) return;
+        v.push_back(x);
+        if (v.size() > 512) v.pop_front();
+    }
+    double Mean() const {
+        return v.empty() ? 0.0 : std::accumulate(v.begin(), v.end(), 0.0) / v.size();
+    }
+    double P95() const {
+        if (v.empty()) return 0.0;
+        std::vector<double> sorted(v.begin(), v.end());
+        size_t index = (size_t)std::ceil(0.95 * sorted.size()) - 1;
+        std::nth_element(sorted.begin(), sorted.begin() + index, sorted.end());
+        return sorted[index];
+    }
+    double Jitter() const {
+        if (v.empty()) return 0.0;
+        double mean = Mean(), square = 0;
+        for (double x : v) square += (x - mean) * (x - mean);
+        return std::sqrt(square / v.size());
+    }
+};
+
 class ExternalFrameGen {
 public:
     ExternalFrameGen(Options options, HWND source)
@@ -357,6 +400,8 @@ public:
             return false;
         }
 
+        InitQueries();
+        if (!m_options.csv.empty()) { std::ofstream reset(m_options.csv, std::ios::trunc); }
         m_running = true;
         WriteTelemetry("starting", 0, 0, 0, 0.0, 0.0);
         m_renderThread = std::thread([this] { RenderLoop(); });
@@ -580,6 +625,112 @@ private:
         Unbind();
     }
 
+
+    void InitQueries() {
+        D3D11_QUERY_DESC d{};
+        for (auto& q : m_queries) {
+            d.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            if (FAILED(m_device->CreateQuery(&d, &q.disjoint))) return;
+            d.Query = D3D11_QUERY_TIMESTAMP;
+            if (FAILED(m_device->CreateQuery(&d, &q.start))) return;
+            if (FAILED(m_device->CreateQuery(&d, &q.end))) return;
+        }
+        m_queriesReady = true;
+    }
+    PassQuery* StartPass(size_t pass) {
+        if (!m_queriesReady) return nullptr;
+        auto& q = m_queries[m_nextQuery];
+        if (q.pending) return nullptr;
+        m_nextQuery = (m_nextQuery + 1) % kSlots;
+        q.pass = pass;
+        q.sequence = ++m_sequence;
+        m_context->Begin(q.disjoint.Get());
+        m_context->End(q.start.Get());
+        return &q;
+    }
+    void StopPass(PassQuery* q) {
+        if (!q) return;
+        m_context->End(q->end.Get());
+        m_context->End(q->disjoint.Get());
+        q->pending = true;
+    }
+    void PollQueries() {
+        for (auto& q : m_queries) {
+            if (!q.pending || m_sequence < q.sequence + 3) continue;
+            D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
+            UINT64 begin = 0, end = 0;
+            UINT flags = D3D11_ASYNC_GETDATA_DONOTFLUSH;
+            HRESULT a = m_context->GetData(q.disjoint.Get(), &disjoint, sizeof(disjoint), flags);
+            HRESULT b = m_context->GetData(q.start.Get(), &begin, sizeof(begin), flags);
+            HRESULT c = m_context->GetData(q.end.Get(), &end, sizeof(end), flags);
+            if (a == S_FALSE || b == S_FALSE || c == S_FALSE) continue;
+            q.pending = false;
+            if (a != S_OK || b != S_OK || c != S_OK ||
+                disjoint.Disjoint || !disjoint.Frequency || end < begin) continue;
+            m_passStats[q.pass].Add(1000.0 * double(end - begin) / double(disjoint.Frequency));
+        }
+    }
+    double GpuTotal() const {
+        double total = 0;
+        for (auto const& stats : m_passStats) total += stats.Mean();
+        return total;
+    }
+    void WritePasses(std::ostream& out) {
+        out << "\"passes\": {";
+        for (size_t i = 0; i < kPasses; ++i) {
+            out << "\"" << kPassNames[i] << "\": {\"mean_ms\": ";
+            if (m_passStats[i].v.empty()) out << "null, \"p95_ms\": null}";
+            else out << m_passStats[i].Mean() << ", \"p95_ms\": " << m_passStats[i].P95() << "}";
+            out << ",";
+        }
+        out << "\"downscale_luma\": null, \"vector_refine_filter\": null}";
+    }
+    void WriteCsv(char const* status, double capture, double presented, double generated) {
+        if (m_options.csv.empty()) return;
+        std::ofstream out(m_options.csv, std::ios::app);
+        if (!out) return;
+        if (!m_csvHeader) {
+            out << "timestamp_unix_ms,status,capture_fps,presented_fps,generated_fps,"
+                   "wgc_frame_interval_ms_mean,present_interval_ms_mean,present_pacing_jitter_ms,engine_gpu_ms_mean";
+            for (auto name : kPassNames) out << "," << name << "_mean_ms," << name << "_p95_ms";
+            out << ",downscale_luma_mean_ms,downscale_luma_p95_ms,"
+                   "vector_refine_filter_mean_ms,vector_refine_filter_p95_ms\n";
+            m_csvHeader = true;
+        }
+        out << std::fixed << std::setprecision(4)
+            << duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count()
+            << "," << status << "," << capture << "," << presented << "," << generated
+            << "," << m_wgcIntervals.Mean() << "," << m_presentIntervals.Mean()
+            << "," << m_presentIntervals.Jitter() << "," << GpuTotal();
+        for (auto const& pass : m_passStats) {
+            if (pass.v.empty()) out << ",,";
+            else out << "," << pass.Mean() << "," << pass.P95();
+        }
+        out << ",,,,\n";
+    }
+    void WriteBenchmark(double elapsed, uint64_t captures, uint64_t presents, uint64_t generated) {
+        if (m_options.benchmarkOutput.empty()) return;
+        std::error_code ec;
+        auto parent = m_options.benchmarkOutput.parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+        std::ofstream out(m_options.benchmarkOutput, std::ios::trunc);
+        if (!out) return;
+        out << std::fixed << std::setprecision(4)
+            << "{\"schema_version\":1,\"status\":\"completed\","
+            << "\"benchmark_seconds\":" << m_options.benchmarkSeconds << ","
+            << "\"target_fps\":" << m_options.targetFps << ","
+            << "\"block_size\":" << m_options.blockSize << ","
+            << "\"search_radius\":" << m_options.searchRadius << ","
+            << "\"capture_fps\":" << captures / std::max(elapsed, 0.001) << ","
+            << "\"presented_fps\":" << presents / std::max(elapsed, 0.001) << ","
+            << "\"generated_fps\":" << generated / std::max(elapsed, 0.001) << ","
+            << "\"wgc_frame_interval_ms_mean\":" << m_wgcIntervals.Mean() << ","
+            << "\"present_interval_ms_mean\":" << m_presentIntervals.Mean() << ","
+            << "\"present_pacing_jitter_ms\":" << m_presentIntervals.Jitter() << ","
+            << "\"engine_gpu_ms_mean\":" << GpuTotal() << ",";
+        WritePasses(out);
+        out << "}\n";
+    }
     void OnFrame(capture::Direct3D11CaptureFramePool const& sender) {
         try {
             auto frame = sender.TryGetNextFrame();
@@ -603,6 +754,10 @@ private:
 
             auto now = steady_clock::now();
             std::scoped_lock lock(m_gpuMutex);
+            if (m_lastWgcTime.time_since_epoch().count())
+                m_wgcIntervals.Add(duration<double, std::milli>(now - m_lastWgcTime).count());
+            m_lastWgcTime = now;
+            auto* copyPass = StartPass(0);
             if (!m_haveCurrent) {
                 m_context->CopyResource(m_curr.Get(), texture.get());
                 m_context->CopyResource(m_prev.Get(), texture.get());
@@ -615,9 +770,14 @@ private:
                 m_context->CopyResource(m_curr.Get(), texture.get());
                 m_prevTime = m_currTime;
                 m_currTime = now;
+                StopPass(copyPass);
+                copyPass = nullptr;
+                auto* flowPass = StartPass(1);
                 DispatchFlow();
+                StopPass(flowPass);
                 m_havePair = true;
             }
+            StopPass(copyPass);
             ++m_captureCount;
         } catch (...) {
             // One bad frame must not kill the game or the helper.
@@ -640,6 +800,8 @@ private:
         auto next = clock::now();
         auto statsAt = next;
         auto overlayAt = next;
+        const auto benchmarkStart = next;
+        const uint64_t startCaptures = m_captureCount.load();
         uint64_t lastCapture = 0, lastPresent = 0, lastGenerated = 0;
 
         while (m_running && ProcessAlive(m_options.gamePid) &&
@@ -661,12 +823,23 @@ private:
                         interpolate = factor > 0.015f && factor < 0.985f;
                     }
                     auto gpuStart = clock::now();
+                    auto* synthesis = StartPass(2);
                     DispatchFrame(factor, interpolate);
+                    StopPass(synthesis);
+                    auto* presentCopy = StartPass(3);
                     m_context->CopyResource(m_swapBuffer.Get(), m_output.Get());
+                    StopPass(presentCopy);
+                    auto* presentQuery = StartPass(4);
                     HRESULT hr = m_swapChain->Present(0, 0);
+                    StopPass(presentQuery);
+                    PollQueries();
                     m_lastEngineMs = (float)(duration<double, std::milli>(
                         clock::now() - gpuStart).count());
                     if (SUCCEEDED(hr)) {
+                        auto presentNow = clock::now();
+                        if (m_lastPresentTime.time_since_epoch().count())
+                            m_presentIntervals.Add(duration<double, std::milli>(presentNow - m_lastPresentTime).count());
+                        m_lastPresentTime = presentNow;
                         ++m_presentCount;
                         if (interpolate) {
                             ++m_generatedCount;
@@ -695,6 +868,7 @@ private:
                         duration<double>(m_currTime - m_prevTime).count(),
                         1.0 / 240.0, 0.12);
                 }
+                WriteCsv("active", captureFps, presentFps, generatedFps);
                 WriteTelemetry("active", captureFps, presentFps, generatedFps,
                                latency, m_lastEngineMs.load());
                 lastCapture = captures;
@@ -703,12 +877,18 @@ private:
                 statsAt = now;
             }
 
+            if (m_options.benchmarkSeconds > 0 &&
+                now - benchmarkStart >= seconds(m_options.benchmarkSeconds)) break;
             next += duration_cast<clock::duration>(period);
             auto current = clock::now();
             if (next < current - milliseconds(50)) next = current;
             std::this_thread::sleep_until(next);
         }
 
+        if (m_options.benchmarkSeconds > 0)
+            WriteBenchmark(duration<double>(clock::now() - benchmarkStart).count(),
+                           m_captureCount.load() - startCaptures,
+                           m_presentCount.load(), m_generatedCount.load());
         WriteTelemetry(m_resizeDetected ? "resize" : "stopped", 0, 0, 0, 0, 0);
         m_running = false;
         if (m_overlay) PostMessageW(m_overlay, WM_SR_STOP, 0, 0);
@@ -733,10 +913,17 @@ private:
             << "  \"generated_fps\": " << generatedFps << ",\n"
             << "  \"latency_ms\": " << latencyMs << ",\n"
             << "  \"engine_ms\": " << engineMs << ",\n"
+            << "  \"engine_gpu_ms_mean\": " << GpuTotal() << ",\n"
+            << "  \"wgc_frame_interval_ms_mean\": " << m_wgcIntervals.Mean() << ",\n"
+            << "  \"present_interval_ms_mean\": " << m_presentIntervals.Mean() << ",\n"
+            << "  \"present_pacing_jitter_ms\": " << m_presentIntervals.Jitter() << ",\n"
             << "  \"width\": " << m_width << ",\n"
             << "  \"height\": " << m_height << ",\n"
             << "  \"block_size\": " << m_options.blockSize << ",\n"
-            << "  \"search_radius\": " << m_options.searchRadius << "\n"
+            << "  \"search_radius\": " << m_options.searchRadius << ",\n"
+            << "  "; 
+        WritePasses(out);
+        out << "\n"
             << "}\n";
         out.close();
         std::filesystem::rename(tmp, m_options.telemetry, ec);
@@ -771,6 +958,13 @@ private:
     ComPtr<ID3D11SamplerState> m_sampler;
     ComPtr<ID3D11ComputeShader> m_flowCs, m_interpCs, m_copyCs;
 
+    std::array<PassQuery, kSlots> m_queries{};
+    std::array<Samples, kPasses> m_passStats{};
+    Samples m_wgcIntervals, m_presentIntervals;
+    steady_clock::time_point m_lastWgcTime{}, m_lastPresentTime{};
+    size_t m_nextQuery = 0;
+    uint64_t m_sequence = 0;
+    bool m_queriesReady = false, m_csvHeader = false;
     std::mutex m_gpuMutex;
     std::thread m_renderThread;
     std::atomic<bool> m_running{false};
@@ -801,6 +995,12 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& out) {
             if (auto v = next()) out.blockSize = _wtoi(v);
         } else if (arg == L"--search-radius") {
             if (auto v = next()) out.searchRadius = _wtoi(v);
+        } else if (arg == L"--csv") {
+            if (auto v = next()) out.csv = v;
+        } else if (arg == L"--benchmark") {
+            if (auto v = next()) out.benchmarkSeconds = _wtoi(v);
+        } else if (arg == L"--benchmark-output") {
+            if (auto v = next()) out.benchmarkOutput = v;
         } else if (arg == L"--telemetry") {
             if (auto v = next()) out.telemetry = v;
         }
@@ -810,6 +1010,8 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& out) {
     // Keep an even radius because the lightweight search advances by 2 pixels.
     out.searchRadius = std::clamp(out.searchRadius, 2, 24);
     if (out.searchRadius & 1) ++out.searchRadius;
+    if (out.benchmarkSeconds < 0 || out.benchmarkSeconds > 86400) return false;
+    if (out.benchmarkSeconds && out.benchmarkOutput.empty()) return false;
     return out.gamePid != 0;
 }
 
