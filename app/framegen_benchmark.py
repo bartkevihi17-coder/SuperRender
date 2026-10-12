@@ -10,8 +10,8 @@ FPS_KEYS = ("capture_fps", "presented_fps", "generated_fps")
 INTERVAL_KEYS = ("wgc_frame_interval_ms_mean", "present_interval_ms_mean",
                  "present_pacing_jitter_ms")
 PASS_KEYS = ("capture_copy", "motion_estimation_l0", "synthesis",
-             "present_copy", "present")
-ABSENT_PASS_KEYS = ("downscale_luma", "vector_refine_filter")
+             "present_copy", "present", "downscale_luma", "vector_refine_filter")
+ABSENT_PASS_KEYS = ()
 
 
 def _number(value, key: str):
