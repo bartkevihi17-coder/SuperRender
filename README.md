@@ -1,6 +1,6 @@
 # SuperRender
 
-**v0.4.0 · Biblioteca de jogos e laboratório de desempenho para Windows**
+**v0.5.0 · Biblioteca de jogos e laboratório de desempenho para Windows**
 
 Aplicativo nativo escrito em Python e Qt (PySide6). Não depende de navegador, HTML, WebGPU ou servidor local. Jogos, favoritos e preferências são armazenados somente no computador do usuário, em `%LOCALAPPDATA%\SuperRender`.
 
@@ -18,14 +18,17 @@ A interface traz um menu recolhível, busca, galeria de destaques, notificaçõe
 | Levemente otimizado | Configurações conservadoras e prioridade acima do normal | Somente prioridade de processo, quando permitida |
 | Otimizado | Configuração experimental de 960×540 e efeitos gráficos reduzidos | Somente prioridade de processo, quando permitida |
 | Potato | Configuração experimental de 640×480 e qualidade mínima | Somente prioridade de processo, quando permitida |
+| Render (Beta) | Preserva o preset visual restaurado e tenta Frame Generation | Preserva o preset visual; FG nativo quando compatível |
 
 O programa **não promete ganhos fixos de FPS**. Adaptações gráficas são específicas de cada jogo. O NBA 2K20 usa seu arquivo `VideoSettings.cfg`, sempre com cópia de segurança e restauração verificável. Jogos com anticheat não recebem alterações automáticas de prioridade.
 
 Você pode escolher um perfil principal e marcar **abrir sem perguntar novamente**. A engrenagem permite alterar essa escolha depois.
 
-**Render (Beta):** quinta opcao experimental com um planejador adaptativo real. Antes de iniciar o jogo, o SuperRender inspeciona as capacidades disponiveis e escolhe um dos caminhos da arquitetura hibrida: **integrado**, **externo** ou **leve**. A decisao e registrada em `%LOCALAPPDATA%\\SuperRender\\render_sessions` junto com campos separados para FPS base, FPS apresentado, custo do motor e latencia. Os backends nativos de reconstrucao e geracao de quadros ainda estao em desenvolvimento; o programa nao inventa FPS nem afirma que gerou quadros quando o backend ainda nao existe.
+**Render (Beta) v0.5:** agora possui um backend nativo experimental de **Frame Generation para jogos Windows x64/DirectX 11**. O jogo continua renderizando com sua configuracao visual atual/restaurada; o Render nao aplica os cortes de qualidade dos perfis Otimizado/Potato. Depois que o processo abre, o SuperRender mede alguns FPS reais e escolhe automaticamente quantos quadros intermediarios inserir para mirar 60 FPS: por exemplo, ~30 FPS usa 2x e ~22–25 FPS usa 3x. O motor limita o automatico a no maximo tres quadros gerados entre quadros reais (4x de cadencia).
 
-O modo Render mostra um aviso de que e experimental e recomendado para jogos offline. O SuperRender nao tenta contornar anticheat. Jogos reconhecidos como competitivos/protegidos sao direcionados automaticamente ao caminho nao invasivo, salvo futura compatibilidade explicitamente validada.
+O backend experimental atual e construido a partir do projeto aberto **Lufzy's Frame Generation (LFG)**, fixado em um commit conhecido e modificado pelo script `scripts/patch_lfg.py` para o modo quality-first do SuperRender. Em GPUs antigas, o SuperRender escolhe uma estimativa de movimento mais barata; em GPUs mais fortes usa uma configuracao de maior qualidade. A resolucao visivel do jogo permanece em 100% nesse caminho.
+
+O modo Render e recomendado para **jogos offline**. O SuperRender nao tenta contornar anticheat, nao faz injecao em titulos reconhecidos como protegidos/competitivos e nao oferece um modo de escolher processos ou DLLs arbitrarios. A decisao e registrada em `%LOCALAPPDATA%\\SuperRender\\render_sessions`, separando FPS base, FPS apresentado e quantidade de quadros gerados.
 
 ## Play e Interromper (0.3.3)
 
@@ -75,10 +78,10 @@ Para máquinas com o executável distribuído, basta abrir `SuperRender.exe`. O 
 ```powershell
 cd "$env:USERPROFILE\Desktop\SuperRender"
 git pull --ff-only
-.\dist\SuperRender.exe
+.\iniciar.bat
 ```
 
-O arquivo compilado também está no repositório em `dist/SuperRender.exe`. Se preferir usar o código-fonte, execute `iniciar.bat` com Python 3.10 ou superior. Compile com `build.bat`.
+O arquivo compilado também está no repositório em `dist/SuperRender.exe`. Em um **clone Git de desenvolvimento**, `iniciar.bat` prefere o código-fonte para que um `git pull` tenha efeito imediatamente. Em pacotes distribuídos sem a pasta `.git`, ele usa o executável compilado. O workflow Windows recompila o backend nativo e o `SuperRender.exe`.
 
 ## Código e licenças
 
@@ -88,9 +91,12 @@ O arquivo compilado também está no repositório em `dist/SuperRender.exe`. Se 
 - `app/rtss_backend.py`: integração exclusiva do nosso código com OSD RTSS e provisionamento opcional via WinGet.
 - `app/optimization.py`: perfis específicos, backups e restauração.
 - `app/render_engine.py`: planejamento adaptativo do Render Beta, selecao de backend e registro de metricas.
+- `app/render_backend.py`: configuracao por PID, validacao de integridade e inicializacao restrita do backend DX11.
+- `scripts/patch_lfg.py`: patch reproduzivel aplicado ao backend LFG fixado pelo build.
 - `app/discovery.py`, `app/artwork.py`, `app/library.py`, `app/launcher.py`: descoberta, imagens, persistência e execução.
 - `tests/`: testes que não abrem jogos.
 - `third_party/PresentMon-LICENSE.txt`: aviso de licença do PresentMon redistribuído.
+- `third_party/LFG-LICENSE.txt` e `THIRD_PARTY.md`: origem/licenca do backend experimental.
 
 Para executar os testes:
 
@@ -98,4 +104,6 @@ Para executar os testes:
 python -m unittest discover -s tests -v
 ```
 
-**Não alteramos os arquivos executáveis dos jogos, DRM, saves ou sistemas de anticheat.** A medição com RTSS depende das APIs e da compatibilidade disponibilizadas pelo software de terceiros.
+**Não alteramos os arquivos executáveis dos jogos, DRM, saves ou sistemas de anticheat.** O backend DX11 experimental atua somente na memoria do processo do jogo iniciado pelo SuperRender e apenas quando o caminho foi validado; nao ha mecanismo de bypass de anticheat. A medicao com RTSS depende das APIs e da compatibilidade disponibilizadas pelo software de terceiros.
+
+O SuperRender e distribuido sob **GNU GPL v3**. Consulte `LICENSE` e `THIRD_PARTY.md`.
