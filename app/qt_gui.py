@@ -1,4 +1,4 @@
-"""SuperRender 0.5 - interface nativa Qt Widgets, sem HTML nem navegador."""
+"""SuperRender 0.6 - interface nativa Qt Widgets, sem HTML nem navegador."""
 from __future__ import annotations
 
 import os
@@ -273,7 +273,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.5.0",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.6.0",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
