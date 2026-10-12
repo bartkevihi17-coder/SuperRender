@@ -1,4 +1,4 @@
-"""SuperRender 0.3 - interface nativa Qt Widgets, sem HTML nem navegador."""
+"""SuperRender 0.5 - interface nativa Qt Widgets, sem HTML nem navegador."""
 from __future__ import annotations
 
 import os
@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (
 from .artwork import ensure_art, photo_file
 from .discovery import discover
 from .launcher import launch
-from .render_engine import prepare_render, plan_summary
+from .render_engine import prepare_render, plan_summary, update_session_metrics
+from .render_backend import start_frame_generation
 from .fps_overlay import FPSController, find_pid_for_executable
 from .game_process import (
     stop_gracefully, force_terminate_verified, is_exact_process_alive,
@@ -271,7 +272,7 @@ class MainWindow(QMainWindow):
         self.add_button=make_button("+  Adicionar jogo",secondary=True)
         self.add_button.clicked.connect(self.add_manual_game)
         side_layout.addWidget(self.add_button)
-        self.side_footer=label("APLICATIVO LOCAL · v0.4.0",8,"muted")
+        self.side_footer=label("APLICATIVO LOCAL · v0.5.0",8,"muted")
         side_layout.addWidget(self.side_footer)
         self.populate_sidebar()
 
@@ -544,6 +545,34 @@ class MainWindow(QMainWindow):
                 self.show_toast("Falha ao buscar jogos",str(data))
             elif typ=="stop_result":
                 self.handle_stop_result(data)
+            elif typ=="render_backend":
+                ident=data.get("id")
+                entry=self.active_launches.get(ident)
+                if entry:
+                    if data.get("ok"):
+                        result=data.get("result") or {}
+                        entry["render_backend_status"]="active"
+                        entry["render_backend_started"]=time.monotonic()
+                        entry["base_fps"]=result.get("base_fps")
+                        update_session_metrics(
+                            entry["game"],
+                            base_fps=result.get("base_fps"),
+                            generated_between=result.get("generated_between"),
+                        )
+                        generated=int(result.get("generated_between") or 0)
+                        base=result.get("base_fps")
+                        base_text=(f"{base:.0f} FPS reais" if isinstance(base,(int,float))
+                                   else "FPS base ainda sem leitura")
+                        self.show_toast(
+                            "Frame Generation ativo",
+                            f"{base_text} · {generated} frame(s) intermediario(s) por quadro · alvo 60 FPS"
+                        )
+                    else:
+                        entry["render_backend_status"]="failed"
+                        self.show_toast(
+                            "Render Beta sem Frame Generation",
+                            shortened(str(data.get("error") or "Backend indisponivel."),150)
+                        )
             elif typ=="session":
                 self.show_toast("SuperRender",data)
         if self.toast and self.toast.isVisible():
@@ -693,10 +722,11 @@ class MainWindow(QMainWindow):
         if mode=="render":
             QMessageBox.information(
                 self,"SuperRender | Render (Beta)",
-                "Render (Beta) e experimental. Para evitar conflitos com anticheat e "
-                "regras de jogos competitivos, recomendamos usa-lo em jogos offline.\n\n"
-                "O SuperRender nao tenta contornar anticheat. O planejador escolhe "
-                "automaticamente o caminho mais seguro disponivel para este jogo."
+                "Render (Beta) e experimental e recomendado para jogos offline. "
+                "Ele NAO reduz o preset grafico para Potato: preserva a configuracao "
+                "visual atual/restaurada do jogo e tenta criar frames intermediarios.\n\n"
+                "O SuperRender nao tenta contornar anticheat. Jogos reconhecidos como "
+                "protegidos ficam fora do backend de injecao."
             )
             try:
                 render_plan=prepare_render(game)
@@ -734,6 +764,10 @@ class MainWindow(QMainWindow):
             "seen":False,"misses":0,"started":time.monotonic(),
             "stopping":False,
             "render_plan":render_plan,
+            "render_backend_attempted":False,
+            "render_backend_status":"pending" if render_plan else "off",
+            "render_backend_started":None,
+            "presented_metric_saved":False,
         }
         self._update_card_state(ident,"starting")
         self.fps_hud.start_game(game)
@@ -762,6 +796,16 @@ class MainWindow(QMainWindow):
         if card is not None:
             card.set_launch_state(state)
 
+    def _render_backend_worker(self,ident,game,pid,base_fps,gpu_name):
+        try:
+            result=start_frame_generation(
+                game,int(pid),base_fps,gpu_name,target_fps=60
+            )
+            payload={"id":ident,"ok":True,"result":result}
+        except Exception as exc:
+            payload={"id":ident,"ok":False,"error":str(exc)}
+        self.messages.put(("render_backend",payload))
+
     def refresh_game_states(self):
         """Checks only SuperRender-launched games, not every process on PC."""
         now=time.monotonic()
@@ -775,6 +819,36 @@ class MainWindow(QMainWindow):
                 new_state="stopping" if entry["stopping"] else "running"
                 entry["state"]=new_state
                 self._update_card_state(ident,new_state)
+
+                plan=entry.get("render_plan")
+                if (plan is not None and plan.backend=="dx11-framegen"
+                        and not entry.get("render_backend_attempted")):
+                    elapsed=now-entry["started"]
+                    base=(self.fps_hud.last_fps
+                          if self.fps_hud.game
+                          and self.fps_hud.game.get("id")==ident
+                          and self.fps_hud.pid==pid else None)
+                    # Measure a few real frames first so 22 FPS can choose 3x,
+                    # 30 FPS can choose 2x, etc. Do not wait forever if ETW
+                    # measurement is unavailable.
+                    if base is not None or elapsed>=9.0:
+                        entry["render_backend_attempted"]=True
+                        entry["render_backend_status"]="starting"
+                        self.executor.submit(
+                            self._render_backend_worker,ident,dict(entry["game"]),
+                            int(pid),base,plan.gpu_name,
+                        )
+
+                if (entry.get("render_backend_status")=="active"
+                        and not entry.get("presented_metric_saved")
+                        and entry.get("render_backend_started")
+                        and now-entry["render_backend_started"]>4.0):
+                    displayed=(self.fps_hud.last_fps
+                               if self.fps_hud.game
+                               and self.fps_hud.game.get("id")==ident else None)
+                    if displayed is not None:
+                        entry["presented_metric_saved"]=True
+                        update_session_metrics(entry["game"],presented_fps=displayed)
                 continue
 
             if entry["seen"]:
