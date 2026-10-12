@@ -36,6 +36,7 @@ from .optimization import (PROFILE_INFO, PROFILE_ORDER, get_adapter, is_running,
                            pending_backup_status, accept_current_config)
 from .ui_dialogs import ProfileDialog
 from .ui_theme import LAUNCH_STATES
+from .ui_telemetry import LiveTelemetryPanel
 from .ui_widgets import (
     P, FeaturedAccordion, Grainient, SidebarItem, SplashOverlay, SwipeToast,
     color, label, make_button,
@@ -338,6 +339,9 @@ class MainWindow(QMainWindow):
         self.status=label("Carregando biblioteca...",9,"muted")
         topline.addWidget(self.status)
         layout.addLayout(topline)
+        self.live_metrics = LiveTelemetryPanel()
+        self.live_metrics.setMaximumHeight(234)
+        layout.addWidget(self.live_metrics)
 
         self.scroller=QScrollArea()
         self.scroller.setWidgetResizable(True)
@@ -860,6 +864,13 @@ class MainWindow(QMainWindow):
                     if telemetry:
                         status=str(telemetry.get("status") or "")
                         if status=="active":
+                            real_sample = (self.fps_hud.last_fps
+                                if self.fps_hud.game
+                                and self.fps_hud.game.get("id")==ident else None)
+                            self.live_metrics.update_data(
+                                time.monotonic(), real_fps=real_sample, telemetry=telemetry,
+                                real_interval_ms=(1000.0/real_sample
+                                    if isinstance(real_sample,(int,float)) and real_sample>0 else None))
                             capture=telemetry.get("capture_fps")
                             presented=telemetry.get("presented_fps")
                             generated_fps=telemetry.get("generated_fps")
