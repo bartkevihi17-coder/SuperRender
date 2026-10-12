@@ -42,9 +42,9 @@ PROFILE_INFO = {
         "sub": "Qualidade preservada + Frame Generation",
         "accent": "#f6cb87",
         "details": "Qualidade primeiro: usa preset alto temporario quando existe um Quality Adapter "
-                   "seguro para o jogo; caso contrario preserva a configuracao atual. Em jogos "
-                   "Windows x64/DX11 compativeis, mede o FPS real e ativa Frame Generation "
-                   "adaptativo para mirar 60 FPS. Recomendado offline."
+                   "seguro para o jogo; caso contrario preserva a configuracao atual. Quando "
+                   "a janela pode ser capturada pelo backend externo, mede os FPS reais e ativa "
+                   "Frame Generation adaptativo para mirar 60 Hz. Recomendado offline."
     },
 }
 
