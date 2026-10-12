@@ -977,6 +977,7 @@ private:
         if (!m_csvHeader) {
             out << "timestamp_unix_ms,status,capture_fps,presented_fps,generated_fps,"
                    "wgc_frame_interval_ms_mean,present_interval_ms_mean,present_pacing_jitter_ms,engine_gpu_ms_mean";
+            out << ",adaptive_tier,adaptive_multiplier,adaptive_reason";
             for (auto name : kPassNames) out << "," << name << "_mean_ms," << name << "_p95_ms";
             out << "\n";
             m_csvHeader = true;
@@ -985,7 +986,8 @@ private:
             << duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count()
             << "," << status << "," << capture << "," << presented << "," << generated
             << "," << m_wgcIntervals.Mean() << "," << m_presentIntervals.Mean()
-            << "," << m_presentIntervals.Jitter() << "," << GpuTotal();
+            << "," << m_presentIntervals.Jitter() << "," << GpuTotal()
+            << "," << m_tier << "," << m_multiplier << "," << m_reason;
         for (auto const& pass : m_passStats) {
             if (pass.v.empty()) out << ",,";
             else out << "," << pass.Mean() << "," << pass.P95();
@@ -1011,7 +1013,10 @@ private:
             << "\"wgc_frame_interval_ms_mean\":" << m_wgcIntervals.Mean() << ","
             << "\"present_interval_ms_mean\":" << m_presentIntervals.Mean() << ","
             << "\"present_pacing_jitter_ms\":" << m_presentIntervals.Jitter() << ","
-            << "\"engine_gpu_ms_mean\":" << GpuTotal() << ",";
+            << "\"engine_gpu_ms_mean\":" << GpuTotal() << ","
+            << "\"adaptive_tier\":" << m_tier << ","
+            << "\"adaptive_multiplier\":" << m_multiplier << ","
+            << "\"adaptive_reason\":\"" << m_reason << "\",";
         WritePasses(out);
         out << "}\n";
     }
