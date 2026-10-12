@@ -23,7 +23,8 @@ from .artwork import ensure_art, photo_file
 from .discovery import discover
 from .launcher import launch
 from .render_engine import prepare_render, plan_summary, update_session_metrics
-from .render_backend import start_frame_generation
+from .render_backend import (start_frame_generation, read_framegen_telemetry,
+                             stop_frame_generation)
 from .fps_overlay import FPSController, find_pid_for_executable
 from .game_process import (
     stop_gracefully, force_terminate_verified, is_exact_process_alive,
@@ -554,6 +555,9 @@ class MainWindow(QMainWindow):
                         entry["render_backend_status"]="active"
                         entry["render_backend_started"]=time.monotonic()
                         entry["base_fps"]=result.get("base_fps")
+                        entry["render_helper_pid"]=result.get("helper_pid")
+                        entry["render_telemetry"]=result.get("telemetry")
+                        entry["metric_toast_shown"]=False
                         update_session_metrics(
                             entry["game"],
                             base_fps=result.get("base_fps"),
@@ -564,8 +568,8 @@ class MainWindow(QMainWindow):
                         base_text=(f"{base:.0f} FPS reais" if isinstance(base,(int,float))
                                    else "FPS base ainda sem leitura")
                         self.show_toast(
-                            "Frame Generation ativo",
-                            f"{base_text} · {generated} frame(s) intermediario(s) por quadro · alvo 60 FPS"
+                            "Frame Generation externo ativo",
+                            f"{base_text} · alvo 60 FPS · sem injecao no processo do jogo"
                         )
                     else:
                         entry["render_backend_status"]="failed"
@@ -768,6 +772,9 @@ class MainWindow(QMainWindow):
             "render_backend_status":"pending" if render_plan else "off",
             "render_backend_started":None,
             "presented_metric_saved":False,
+            "render_helper_pid":None,
+            "render_telemetry":None,
+            "metric_toast_shown":False,
         }
         self._update_card_state(ident,"starting")
         self.fps_hud.start_game(game)
@@ -821,7 +828,7 @@ class MainWindow(QMainWindow):
                 self._update_card_state(ident,new_state)
 
                 plan=entry.get("render_plan")
-                if (plan is not None and plan.backend=="dx11-framegen"
+                if (plan is not None and plan.backend=="external-framegen"
                         and not entry.get("render_backend_attempted")):
                     elapsed=now-entry["started"]
                     base=(self.fps_hud.last_fps
@@ -839,16 +846,42 @@ class MainWindow(QMainWindow):
                             int(pid),base,plan.gpu_name,
                         )
 
-                if (entry.get("render_backend_status")=="active"
-                        and not entry.get("presented_metric_saved")
-                        and entry.get("render_backend_started")
-                        and now-entry["render_backend_started"]>4.0):
-                    displayed=(self.fps_hud.last_fps
-                               if self.fps_hud.game
-                               and self.fps_hud.game.get("id")==ident else None)
-                    if displayed is not None:
-                        entry["presented_metric_saved"]=True
-                        update_session_metrics(entry["game"],presented_fps=displayed)
+                if entry.get("render_backend_status")=="active":
+                    telemetry=read_framegen_telemetry(entry.get("render_telemetry") or "")
+                    if telemetry:
+                        status=str(telemetry.get("status") or "")
+                        if status=="active":
+                            capture=telemetry.get("capture_fps")
+                            presented=telemetry.get("presented_fps")
+                            generated_fps=telemetry.get("generated_fps")
+                            engine_ms=telemetry.get("engine_ms")
+                            latency=telemetry.get("latency_ms")
+                            update_session_metrics(
+                                entry["game"],
+                                capture_fps=capture,
+                                presented_fps=presented,
+                                generated_fps=generated_fps,
+                                engine_cost_ms=engine_ms,
+                                latency_ms=latency,
+                            )
+                            if (not entry.get("metric_toast_shown")
+                                    and isinstance(presented,(int,float))
+                                    and presented>1):
+                                entry["metric_toast_shown"]=True
+                                real=(entry.get("base_fps") or capture)
+                                real_text=(f"{real:.0f}" if isinstance(real,(int,float))
+                                           else "--")
+                                self.show_toast(
+                                    "Render Beta medido",
+                                    f"FPS real/captura {real_text} · saida {presented:.0f} · "
+                                    f"gerados {float(generated_fps or 0):.0f}/s"
+                                )
+                        elif status in ("error","stopped","resize"):
+                            entry["render_backend_status"]="failed"
+                            self.show_toast(
+                                "Frame Generation externo interrompido",
+                                shortened(str(telemetry.get("message") or status),140)
+                            )
                 continue
 
             if entry["seen"]:
@@ -871,6 +904,11 @@ class MainWindow(QMainWindow):
     def _finished_game(self,ident:str):
         entry=self.active_launches.pop(ident,None)
         self._update_card_state(ident,"idle")
+        if entry:
+            helper_pid=entry.get("render_helper_pid")
+            if helper_pid:
+                try:stop_frame_generation(int(helper_pid))
+                except Exception:pass
         if entry and self.fps_hud.game and self.fps_hud.game.get("id")==ident:
             self.fps_hud.stop()
 
@@ -950,6 +988,11 @@ class MainWindow(QMainWindow):
         self.gradient.timing.stop()
         self.running_poll.stop()
         self.fps_hud.close()
+        for entry in list(self.active_launches.values()):
+            helper_pid=entry.get("render_helper_pid")
+            if helper_pid:
+                try:stop_frame_generation(int(helper_pid))
+                except Exception:pass
         self.executor.shutdown(wait=False,cancel_futures=True)
         # Monitoramento de jogo continua so enquanto o programa estiver aberto.
         # Uma sessao pendente sera restaurada no proximo inicio.
