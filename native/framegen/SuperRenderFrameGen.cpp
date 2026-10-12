@@ -102,6 +102,37 @@ Texture2D<float> PrevLuma : register(t3);
 Texture2D<float> CurrLuma : register(t4);
 StructuredBuffer<float4> PreviousMotion : register(t5);
 RWTexture2D<float> LumaOut : register(u2);
+StructuredBuffer<float4> RawMotion : register(t6);
+RWStructuredBuffer<float4> FilteredMotion : register(u3);
+RWTexture2D<float> ConfidenceOut : register(u4);
+
+float Median3(float a,float b,float c)
+{
+    return max(min(a,b),min(max(a,b),c));
+}
+
+[numthreads(8,8,1)]
+void FilterMotion(uint3 id : SV_DispatchThreadID)
+{
+    uint nx=(Width+BlockSize-1)/BlockSize;
+    uint ny=(Height+BlockSize-1)/BlockSize;
+    if(id.x>=nx || id.y>=ny) return;
+    uint k=id.y*nx+id.x;
+    float4 center=RawMotion[k];
+    float4 left=RawMotion[id.y*nx+(id.x>0?id.x-1:id.x)];
+    float4 right=RawMotion[id.y*nx+min(id.x+1,nx-1)];
+    float4 up=RawMotion[(id.y>0?id.y-1:id.y)*nx+id.x];
+    float4 down=RawMotion[min(id.y+1,ny-1)*nx+id.x];
+    float2 median=float2(
+      Median3(Median3(left.x,center.x,right.x),up.x,down.x),
+      Median3(Median3(left.y,center.y,right.y),up.y,down.y));
+    float disagreement=length(center.xy-median)/max((float)BlockSize,1.0);
+    float confidence=saturate(center.w * (1.0-saturate(disagreement)));
+    float2 vector=lerp(median,center.xy,confidence);
+    FilteredMotion[k]=float4(vector,center.z,confidence);
+    ConfidenceOut[id.xy]=confidence;
+}
+
 
 [numthreads(8,8,1)]
 void LumaDownsample(uint3 id : SV_DispatchThreadID)
@@ -320,9 +351,9 @@ static LRESULT CALLBACK OverlayProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 
-static constexpr size_t kPasses = 6, kSlots = 128;
+static constexpr size_t kPasses = 7, kSlots = 128;
 static constexpr char const* kPassNames[kPasses] = {
-    "capture_copy", "motion_estimation_l0", "synthesis", "present_copy", "present", "downscale_luma"
+    "capture_copy", "motion_estimation_l0", "synthesis", "present_copy", "present", "downscale_luma", "vector_refine_filter"
 };
 struct PassQuery {
     ComPtr<ID3D11Query> disjoint, start, end;
@@ -577,6 +608,22 @@ private:
         hr = m_device->CreateUnorderedAccessView(m_motion.Get(), &uav, &m_motionUav);
         if (FAILED(hr)) { error = L"Could not create motion UAV."; return false; }
 
+        hr = m_device->CreateBuffer(&motion, nullptr, &m_motionFiltered);
+        if (FAILED(hr)) return false;
+        hr = m_device->CreateShaderResourceView(m_motionFiltered.Get(), &srv, &m_motionFilteredSrv);
+        if (FAILED(hr)) return false;
+        hr = m_device->CreateUnorderedAccessView(m_motionFiltered.Get(), &uav, &m_motionFilteredUav);
+        if (FAILED(hr)) return false;
+        D3D11_TEXTURE2D_DESC confidence = input;
+        confidence.Width = m_blocksX;
+        confidence.Height = m_blocksY;
+        confidence.Format = DXGI_FORMAT_R8_UNORM;
+        confidence.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+        hr = m_device->CreateTexture2D(&confidence, nullptr, &m_confidence);
+        if (FAILED(hr)) return false;
+        hr = m_device->CreateUnorderedAccessView(m_confidence.Get(), nullptr, &m_confidenceUav);
+        if (FAILED(hr)) return false;
+
         // R8_UNORM pyramid. Full-color textures remain exclusive to synthesis.
         D3D11_TEXTURE2D_DESC luma = input;
         luma.Format = DXGI_FORMAT_R8_UNORM;
@@ -648,6 +695,7 @@ private:
 
     bool CompileShaders(std::wstring& error) {
         return CompileOne("Flow", m_flowCs, error) &&
+               CompileOne("FilterMotion", m_filterCs, error) &&
                CompileOne("LumaDownsample", m_lumaCs, error) &&
                CompileOne("LumaQuarter", m_quarterCs, error) &&
                CompileOne("Interpolate", m_interpCs, error) &&
@@ -671,10 +719,10 @@ private:
     }
 
     void Unbind() {
-        ID3D11ShaderResourceView* nullSrv[6] = {};
-        ID3D11UnorderedAccessView* nullUav[3] = {};
-        m_context->CSSetShaderResources(0, 6, nullSrv);
-        m_context->CSSetUnorderedAccessViews(0, 3, nullUav, nullptr);
+        ID3D11ShaderResourceView* nullSrv[7] = {};
+        ID3D11UnorderedAccessView* nullUav[5] = {};
+        m_context->CSSetShaderResources(0, 7, nullSrv);
+        m_context->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
         m_context->CSSetShader(nullptr, nullptr, 0);
     }
 
@@ -710,13 +758,24 @@ private:
         m_context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
         m_context->Dispatch((m_blocksX + 7) / 8, (m_blocksY + 7) / 8, 1);
         Unbind();
-        m_context->CopyResource(m_motionPrevious.Get(), m_motion.Get());
+    }
+
+    void DispatchFilter() {
+        ID3D11ShaderResourceView* input=m_motionSrv.Get();
+        ID3D11UnorderedAccessView* output[2]={m_motionFilteredUav.Get(),m_confidenceUav.Get()};
+        m_context->CSSetShader(m_filterCs.Get(),nullptr,0);
+        m_context->CSSetConstantBuffers(0,1,m_params.GetAddressOf());
+        m_context->CSSetShaderResources(6,1,&input);
+        m_context->CSSetUnorderedAccessViews(3,2,output,nullptr);
+        m_context->Dispatch((m_blocksX+7)/8,(m_blocksY+7)/8,1);
+        Unbind();
+        m_context->CopyResource(m_motionPrevious.Get(),m_motionFiltered.Get());
     }
 
     void DispatchFrame(float factor, bool interpolate) {
         UpdateParams(factor);
         ID3D11ShaderResourceView* srvs[3] = {
-            m_prevSrv.Get(), m_currSrv.Get(), m_motionSrv.Get()
+            m_prevSrv.Get(), m_currSrv.Get(), m_motionFilteredSrv.Get()
         };
         ID3D11UnorderedAccessView* uavs[2] = {nullptr, m_outputUav.Get()};
         m_context->CSSetShader(interpolate ? m_interpCs.Get() : m_copyCs.Get(), nullptr, 0);
@@ -786,7 +845,7 @@ private:
             else out << m_passStats[i].Mean() << ", \"p95_ms\": " << m_passStats[i].P95() << "}";
             out << ",";
         }
-        out << "\"vector_refine_filter\": null}";
+        out << "\"confidence_map\": \"R8_UNORM\"}";
     }
     void WriteCsv(char const* status, double capture, double presented, double generated) {
         if (m_options.csv.empty()) return;
@@ -796,7 +855,7 @@ private:
             out << "timestamp_unix_ms,status,capture_fps,presented_fps,generated_fps,"
                    "wgc_frame_interval_ms_mean,present_interval_ms_mean,present_pacing_jitter_ms,engine_gpu_ms_mean";
             for (auto name : kPassNames) out << "," << name << "_mean_ms," << name << "_p95_ms";
-            out << ",vector_refine_filter_mean_ms,vector_refine_filter_p95_ms\n";
+            out << "\n";
             m_csvHeader = true;
         }
         out << std::fixed << std::setprecision(4)
@@ -808,7 +867,7 @@ private:
             if (pass.v.empty()) out << ",,";
             else out << "," << pass.Mean() << "," << pass.P95();
         }
-        out << ",,\n";
+        out << "\n";
     }
     void WriteBenchmark(double elapsed, uint64_t captures, uint64_t presents, uint64_t generated) {
         if (m_options.benchmarkOutput.empty()) return;
@@ -884,6 +943,9 @@ private:
                 auto* flowPass = StartPass(1);
                 DispatchFlow();
                 StopPass(flowPass);
+                auto* filterPass = StartPass(6);
+                DispatchFilter();
+                StopPass(filterPass);
                 m_havePair = true;
             }
             StopPass(copyPass);
@@ -1070,7 +1132,12 @@ private:
     ComPtr<ID3D11Buffer> m_motion, m_params;
     ComPtr<ID3D11SamplerState> m_sampler;
     ComPtr<ID3D11ComputeShader> m_flowCs, m_interpCs, m_copyCs;
-    ComPtr<ID3D11ComputeShader> m_lumaCs, m_quarterCs;
+    ComPtr<ID3D11ComputeShader> m_lumaCs, m_quarterCs, m_filterCs;
+    ComPtr<ID3D11Buffer> m_motionFiltered;
+    ComPtr<ID3D11ShaderResourceView> m_motionFilteredSrv;
+    ComPtr<ID3D11UnorderedAccessView> m_motionFilteredUav;
+    ComPtr<ID3D11Texture2D> m_confidence;
+    ComPtr<ID3D11UnorderedAccessView> m_confidenceUav;
     ComPtr<ID3D11Texture2D> m_lumaHalf[2], m_lumaQuarter[2];
     ComPtr<ID3D11ShaderResourceView> m_lumaHalfSrv[2], m_lumaQuarterSrv[2];
     ComPtr<ID3D11UnorderedAccessView> m_lumaHalfUav[2], m_lumaQuarterUav[2];
