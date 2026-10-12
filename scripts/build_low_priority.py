@@ -12,7 +12,8 @@ from PyInstaller.__main__ import run
 
 ROOT=Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
-run([
+
+args=[
     "--clean","--noconfirm","--onefile","--windowed",
     "--icon","assets/SuperRender.ico",
     "--add-data","assets/SuperRender.ico;assets",
@@ -21,5 +22,18 @@ run([
     "--add-data","third_party/PresentMon-LICENSE.txt;third_party",
     "--name","SuperRender",
     "--distpath",os.environ.get("SUPERRENDER_DIST_DIR","dist"),
-    "run.pyw",
-])
+]
+
+# The native Frame Generation backend is built separately. Development/source
+# runs still work without it; Render Beta will report that FG is unavailable.
+for extra in (
+    "third_party/LFG.dll",
+    "third_party/LFG-LICENSE.txt",
+    "third_party/LFG-SHA256.txt",
+    "third_party/LFG-UPSTREAM-COMMIT.txt",
+):
+    if (ROOT/extra).is_file():
+        args.extend(["--add-data",extra+";third_party"])
+
+args.append("run.pyw")
+run(args)
