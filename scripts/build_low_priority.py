@@ -24,13 +24,12 @@ args=[
     "--distpath",os.environ.get("SUPERRENDER_DIST_DIR","dist"),
 ]
 
-# The native Frame Generation backend is built separately. Development/source
-# runs still work without it; Render Beta will report that FG is unavailable.
+# Built from this repository's native/framegen source. Development/source
+# runs remain usable without it; Render Beta reports FG as unavailable until
+# the helper exists rather than downloading or injecting anything.
 for extra in (
-    "third_party/LFG.dll",
-    "third_party/LFG-LICENSE.txt",
-    "third_party/LFG-SHA256.txt",
-    "third_party/LFG-UPSTREAM-COMMIT.txt",
+    "third_party/SuperRenderFrameGen.exe",
+    "third_party/SuperRenderFrameGen-SHA256.txt",
 ):
     if (ROOT/extra).is_file():
         args.extend(["--add-data",extra+";third_party"])
