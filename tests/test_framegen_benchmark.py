@@ -41,9 +41,9 @@ def test_benchmark_rejects_impossible_generated_fps(tmp_path):
         parse_benchmark_json(source)
 
 
-def test_benchmark_absent_passes_are_null(tmp_path):
+def test_benchmark_rejects_missing_luma_measurement(tmp_path):
     data = example()
-    data["passes"]["downscale_luma"] = {"mean_ms": 0, "p95_ms": 0}
+    del data["passes"]["downscale_luma"]
     source = tmp_path / "report.json"
     source.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="downscale_luma"):
