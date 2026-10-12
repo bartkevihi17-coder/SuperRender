@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.optimization import PROFILE_ORDER, PROFILE_INFO, prepare_game, profile_changes
+from app.optimization import (PROFILE_ORDER, PROFILE_INFO, prepare_game,
+                              profile_changes, restore_game)
 from app import optimization, launcher
 
 
@@ -16,17 +17,46 @@ class RenderBetaTests(unittest.TestCase):
         self.assertEqual(PROFILE_INFO["render"]["title"],"Render (Beta)")
         self.assertIn("Frame Generation",PROFILE_INFO["render"]["details"])
 
-    def test_no_graphics_mutations_even_on_nba(self):
+    def test_render_quality_adapter_is_high_and_reversible(self):
         with tempfile.TemporaryDirectory() as root:
             cfg=Path(root)/"VideoSettings.cfg"
-            original=json.dumps({"WIDTH":1280,"HEIGHT":720}).encode("utf-8")
+            exe=Path(root)/"NBA2K20.exe"
+            exe.write_bytes(b"test")
+            original=(json.dumps({
+                "WIDTH":1280,"HEIGHT":720,"OVERALL_QUALITY":4,
+                "CROWDLOD":3,"PLAYERLOD":2,"TEXTURELOD":2,
+                "SHADER_DETAIL":2,"SHADOW_DETAIL":4,
+            })+"\n").encode("utf-8")
             cfg.write_bytes(original)
             game={"id":"test:nba","name":"NBA 2K20","source":"Manual",
-                  "exe":str(Path(root)/"NBA2K20.exe")}
-            with patch.object(optimization,"nba_config_path",return_value=cfg):
-                self.assertEqual(profile_changes(game,"render",{"WIDTH":1280}),{})
-                self.assertIsNone(prepare_game(game,"render"))
+                  "exe":str(exe)}
+            with (patch.object(optimization,"nba_config_path",return_value=cfg),
+                  patch.object(optimization,"_BACKUPS",Path(root)/"backups"),
+                  patch.object(optimization,"_SESSIONS",Path(root)/"sessions"),
+                  patch.object(optimization,"is_running",return_value=False)):
+                changes=profile_changes(game,"render",json.loads(original))
+                self.assertEqual(changes["CROWDLOD"],0)
+                self.assertEqual(changes["PLAYERLOD"],0)
+                self.assertEqual(changes["TEXTURELOD"],0)
+                self.assertEqual(changes["SHADOW_DETAIL"],1)
+                self.assertNotIn("WIDTH",changes)
+                self.assertNotIn("HEIGHT",changes)
+                state=prepare_game(game,"render")
+                self.assertIsNotNone(state)
+                applied=json.loads(cfg.read_text(encoding="utf-8"))
+                self.assertEqual(applied["WIDTH"],1280)
+                self.assertEqual(applied["HEIGHT"],720)
+                self.assertEqual(applied["CROWDLOD"],0)
+                self.assertEqual(applied["PLAYERLOD"],0)
+                self.assertEqual(applied["TEXTURELOD"],0)
+                self.assertTrue(applied["AMBIENT_OCCLUSION"])
+                self.assertEqual(restore_game(game),"Configuracoes originais restauradas.")
                 self.assertEqual(cfg.read_bytes(),original)
+
+    def test_render_without_quality_adapter_does_not_change_game_config(self):
+        game={"id":"test:other","name":"Other Game","source":"Manual",
+              "exe":"C:/Games/Other/Other.exe"}
+        self.assertEqual(profile_changes(game,"render",{"WIDTH":1920,"HEIGHT":1080}),{})
 
     def test_launcher_render_uses_normal_execution_no_priority_change(self):
         if os.name!="nt":
