@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .library import APP_DATA
-from .quality_adapters import has_quality_adapter, render_quality_changes
+from .quality_adapters import has_quality_adapter, render_quality_changes, render_budgeted_changes
 
 PROFILE_ORDER = ("normal", "light", "optimized", "potato", "render")
 PROFILE_INFO = {
@@ -103,7 +103,15 @@ def profile_changes(game: dict, profile: str, current: dict) -> dict:
     if profile == "normal" or not supports_graphic_profile(game):
         return {}
     if profile == "render":
-        return render_quality_changes(get_adapter(game), current)
+        # A calibration is usable only for the exact game/GPU/driver/resolution.
+        # Uncalibrated hardware retains the user's settings instead of guessing.
+        return render_budgeted_changes(
+            get_adapter(game), current,
+            game_id=str(game.get("id") or game.get("exe") or ""),
+            gpu=str(game.get("gpu_name") or ""),
+            driver=str(game.get("gpu_driver") or ""),
+            target_p95_ms=float(game.get("quality_target_p95_ms") or 33.0),
+        )
     if profile == "light":
         # Conservador: evita modificar resolucao, torcida e detalhes que
         # o proprio usuario deseja preservar.
