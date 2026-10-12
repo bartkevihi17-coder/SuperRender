@@ -1,5 +1,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 #include <dwmapi.h>
 #include <d3d11.h>
 #include <dxgi1_3.h>
@@ -19,6 +20,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -26,6 +28,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <utility>
 
 using Microsoft::WRL::ComPtr;
 using namespace std::chrono;
