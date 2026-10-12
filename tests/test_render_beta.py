@@ -47,6 +47,7 @@ class RenderBetaTests(unittest.TestCase):
                 self.assertEqual(applied["WIDTH"],1280)
                 self.assertEqual(applied["HEIGHT"],720)
                 self.assertEqual(applied["CROWDLOD"],0)
+                self.assertEqual(applied["WINDOWMODE"],2)
                 self.assertEqual(applied["PLAYERLOD"],0)
                 self.assertEqual(applied["TEXTURELOD"],0)
                 self.assertTrue(applied["AMBIENT_OCCLUSION"])
