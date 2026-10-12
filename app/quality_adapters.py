@@ -26,6 +26,9 @@ def _nba2k20_high(current: dict) -> dict:
     """
     return {
         "OVERALL_QUALITY": 4,  # Custom: individual values below are honored.
+        "WINDOWMODE": 2,        # Borderless: required by the external presenter.
+        "VSYNC": 0,
+        "BUFFERCOUNT": 1,
         "MAXANISOTROPY": 16,
         "ALLOW_BLURRY_UI": False,
         "TEXTURELOD": 0,
@@ -69,8 +72,9 @@ def render_quality_changes(adapter: str | None, current: dict) -> dict:
     if fn is None:
         return {}
     changes = fn(dict(current))
-    # Resolution/window placement are intentionally not part of adapters.
-    # Render quality policy never silently lowers or raises native resolution.
-    for forbidden in ("WIDTH", "HEIGHT", "WINDOWMODE", "WINDOW_X", "WINDOW_Y", "MONITOR"):
+    # Resolution and monitor are never changed. A known adapter may switch the
+    # presentation mode (for example exclusive fullscreen -> borderless) when
+    # the external compositor needs DWM visibility; the original is restored.
+    for forbidden in ("WIDTH", "HEIGHT", "WINDOW_X", "WINDOW_Y", "MONITOR"):
         changes.pop(forbidden, None)
     return changes
