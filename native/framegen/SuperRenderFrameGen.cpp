@@ -648,7 +648,7 @@ private:
         if (q.pending) return nullptr;
         m_nextQuery = (m_nextQuery + 1) % kSlots;
         q.pass = pass;
-        q.sequence = ++m_sequence;
+        q.sequence = m_frameSequence;
         m_context->Begin(q.disjoint.Get());
         m_context->End(q.start.Get());
         return &q;
@@ -661,7 +661,7 @@ private:
     }
     void PollQueries() {
         for (auto& q : m_queries) {
-            if (!q.pending || m_sequence < q.sequence + 3) continue;
+            if (!q.pending || m_frameSequence < q.sequence + 3) continue;
             D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
             UINT64 begin = 0, end = 0;
             UINT flags = D3D11_ASYNC_GETDATA_DONOTFLUSH;
@@ -837,6 +837,7 @@ private:
                     auto* presentQuery = StartPass(4);
                     HRESULT hr = m_swapChain->Present(0, 0);
                     StopPass(presentQuery);
+                    ++m_frameSequence;
                     PollQueries();
                     m_lastEngineMs = (float)(duration<double, std::milli>(
                         clock::now() - gpuStart).count());
@@ -860,6 +861,7 @@ private:
                 overlayAt = now;
             }
             if (now - statsAt >= seconds(1)) {
+                std::scoped_lock statsLock(m_gpuMutex);
                 double secondsElapsed = duration<double>(now - statsAt).count();
                 uint64_t captures = m_captureCount.load();
                 uint64_t presents = m_presentCount.load();
@@ -890,6 +892,8 @@ private:
             std::this_thread::sleep_until(next);
         }
 
+        m_running = false;
+        std::scoped_lock finalStatsLock(m_gpuMutex);
         if (m_options.benchmarkSeconds > 0)
             WriteBenchmark(duration<double>(clock::now() - benchmarkStart).count(),
                            m_captureCount.load() - startCaptures,
@@ -968,7 +972,7 @@ private:
     Samples m_wgcIntervals, m_presentIntervals;
     steady_clock::time_point m_lastWgcTime{}, m_lastPresentTime{};
     size_t m_nextQuery = 0;
-    uint64_t m_sequence = 0;
+    uint64_t m_frameSequence = 0;
     bool m_queriesReady = false, m_csvHeader = false;
     std::mutex m_gpuMutex;
     std::thread m_renderThread;
