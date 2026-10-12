@@ -1,6 +1,6 @@
 # SuperRender
 
-**v0.5.0 · Biblioteca de jogos e laboratório de desempenho para Windows**
+**v0.6.0 · Biblioteca de jogos e laboratório de desempenho para Windows**
 
 Aplicativo nativo escrito em Python e Qt (PySide6). Não depende de navegador, HTML, WebGPU ou servidor local. Jogos, favoritos e preferências são armazenados somente no computador do usuário, em `%LOCALAPPDATA%\SuperRender`.
 
@@ -18,17 +18,19 @@ A interface traz um menu recolhível, busca, galeria de destaques, notificaçõe
 | Levemente otimizado | Configurações conservadoras e prioridade acima do normal | Somente prioridade de processo, quando permitida |
 | Otimizado | Configuração experimental de 960×540 e efeitos gráficos reduzidos | Somente prioridade de processo, quando permitida |
 | Potato | Configuração experimental de 640×480 e qualidade mínima | Somente prioridade de processo, quando permitida |
-| Render (Beta) | Preserva o preset visual restaurado e tenta Frame Generation | Preserva o preset visual; FG nativo quando compatível |
+| Render (Beta) | Quality Adapter alto + Frame Generation externo | Preserva o preset; FG externo quando compativel |
 
 O programa **não promete ganhos fixos de FPS**. Adaptações gráficas são específicas de cada jogo. O NBA 2K20 usa seu arquivo `VideoSettings.cfg`, sempre com cópia de segurança e restauração verificável. Jogos com anticheat não recebem alterações automáticas de prioridade.
 
 Você pode escolher um perfil principal e marcar **abrir sem perguntar novamente**. A engrenagem permite alterar essa escolha depois.
 
-**Render (Beta) v0.5:** agora possui um backend nativo experimental de **Frame Generation para jogos Windows x64/DirectX 11**. O jogo continua renderizando com sua configuracao visual atual/restaurada; o Render nao aplica os cortes de qualidade dos perfis Otimizado/Potato. Depois que o processo abre, o SuperRender mede alguns FPS reais e escolhe automaticamente quantos quadros intermediarios inserir para mirar 60 FPS: por exemplo, ~30 FPS usa 2x e ~22–25 FPS usa 3x. O motor limita o automatico a no maximo tres quadros gerados entre quadros reais (4x de cadencia).
+**Render (Beta) v0.6:** o caminho experimental de Frame Generation foi redesenhado para **nao injetar DLL no jogo**. O SuperRender inicia um helper proprio em processo separado, captura apenas a janela do jogo com Windows Graphics Capture, estima movimento em compute shaders D3D11 e apresenta uma cadencia sintetizada em um overlay click-through. O jogo continua sendo o responsavel pelos frames reais; o SuperRender mede separadamente FPS capturado/real, FPS apresentado, FPS gerado, custo do motor e latencia.
 
-O backend experimental atual e construido a partir do projeto aberto **Lufzy's Frame Generation (LFG)**, fixado em um commit conhecido e modificado pelo script `scripts/patch_lfg.py` para o modo quality-first do SuperRender. Em GPUs antigas, o SuperRender escolhe uma estimativa de movimento mais barata; em GPUs mais fortes usa uma configuracao de maior qualidade. A resolucao visivel do jogo permanece em 100% nesse caminho.
+A politica visual e **quality-first**. O nucleo de Frame Generation e geral; configuracoes de qualidade ficam em `Quality Adapters` plugaveis. Quando existe um adaptador validado, o Render aplica temporariamente um preset alto e reversivel sem reduzir WIDTH/HEIGHT. O NBA 2K20 e apenas o primeiro adaptador: usa torcida/jogadores/texturas em alta, sombras High (nao Ultra), efeitos visuais relevantes ligados e fullscreen-windowed para o compositor externo. Ao fechar o jogo, o backup anterior e restaurado. Jogos sem adaptador mantem suas configuracoes atuais.
 
-O modo Render e recomendado para **jogos offline**. O SuperRender nao tenta contornar anticheat, nao faz injecao em titulos reconhecidos como protegidos/competitivos e nao oferece um modo de escolher processos ou DLLs arbitrarios. A decisao e registrada em `%LOCALAPPDATA%\\SuperRender\\render_sessions`, separando FPS base, FPS apresentado e quantidade de quadros gerados.
+Em GPUs antigas, o helper usa uma busca de movimento mais barata (blocos maiores e raio menor); hardware mais forte recebe uma estimativa mais refinada. A meta padrao e 60 Hz de saida, mas **quadros gerados nao sao chamados de FPS reais**: a simulacao e a resposta aos comandos continuam limitadas pelos frames reais produzidos pelo jogo.
+
+O modo Render continua recomendado para **jogos offline**. Por politica do SuperRender, titulos reconhecidos como competitivos/protegidos nao recebem o backend experimental. Nao ha mecanismo de bypass de anticheat, escolha arbitraria de processos ou carregamento de DLL em jogos.
 
 ## Play e Interromper (0.3.3)
 
@@ -91,12 +93,13 @@ O arquivo compilado também está no repositório em `dist/SuperRender.exe`. Em 
 - `app/rtss_backend.py`: integração exclusiva do nosso código com OSD RTSS e provisionamento opcional via WinGet.
 - `app/optimization.py`: perfis específicos, backups e restauração.
 - `app/render_engine.py`: planejamento adaptativo do Render Beta, selecao de backend e registro de metricas.
-- `app/render_backend.py`: configuracao por PID, validacao de integridade e inicializacao restrita do backend DX11.
-- `scripts/patch_lfg.py`: patch reproduzivel aplicado ao backend LFG fixado pelo build.
+- `app/render_backend.py`: inicia/verifica o helper externo e le telemetria do Frame Generation.
+- `app/quality_adapters.py`: presets quality-first reversiveis e plugaveis por jogo.
+- `native/framegen/`: helper proprio WGC/D3D11 com estimativa de movimento e interpolacao.
 - `app/discovery.py`, `app/artwork.py`, `app/library.py`, `app/launcher.py`: descoberta, imagens, persistência e execução.
 - `tests/`: testes que não abrem jogos.
 - `third_party/PresentMon-LICENSE.txt`: aviso de licença do PresentMon redistribuído.
-- `third_party/LFG-LICENSE.txt` e `THIRD_PARTY.md`: origem/licenca do backend experimental.
+- `THIRD_PARTY.md`: componentes externos e origem dos binarios distribuidos.
 
 Para executar os testes:
 
@@ -104,6 +107,6 @@ Para executar os testes:
 python -m unittest discover -s tests -v
 ```
 
-**Não alteramos os arquivos executáveis dos jogos, DRM, saves ou sistemas de anticheat.** O backend DX11 experimental atua somente na memoria do processo do jogo iniciado pelo SuperRender e apenas quando o caminho foi validado; nao ha mecanismo de bypass de anticheat. A medicao com RTSS depende das APIs e da compatibilidade disponibilizadas pelo software de terceiros.
+**Não alteramos os executáveis dos jogos, DRM, saves ou sistemas de anticheat.** O Frame Generation atual roda em processo separado e usa captura de janela; nao injeta DLL nem grava na memoria do jogo. A medicao com RTSS depende das APIs e da compatibilidade disponibilizadas pelo software de terceiros.
 
 O SuperRender e distribuido sob **GNU GPL v3**. Consulte `LICENSE` e `THIRD_PARTY.md`.
