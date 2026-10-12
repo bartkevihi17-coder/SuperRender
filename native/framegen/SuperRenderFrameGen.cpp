@@ -1,4 +1,3 @@
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
 #include <dwmapi.h>
@@ -35,6 +34,14 @@ using namespace std::chrono;
 namespace capture = winrt::Windows::Graphics::Capture;
 namespace directx = winrt::Windows::Graphics::DirectX;
 namespace direct3d11 = winrt::Windows::Graphics::DirectX::Direct3D11;
+
+// Some Windows SDK revisions do not expose this desktop interop interface
+// as a C++ symbol even though the ABI is available. Declare its documented
+// IUnknown contract locally instead of depending on SDK-specific aliases.
+struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1"))
+IDirect3DDxgiInterfaceAccess : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE GetInterface(REFIID iid, void** object) = 0;
+};
 
 static constexpr wchar_t kWindowClass[] = L"SuperRender.ExternalFrameGen";
 static constexpr UINT WM_SR_STOP = WM_APP + 41;
