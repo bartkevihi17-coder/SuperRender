@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths-ignore:
       - "dist/**"
-      - "third_party/LFG.dll"
-      - "third_party/LFG-SHA256.txt"
+      - "third_party/SuperRenderFrameGen.exe"
+      - "third_party/SuperRenderFrameGen-SHA256.txt"
 
 permissions:
   contents: write
+
+concurrency:
+  group: superrender-windows-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -31,30 +35,16 @@ jobs:
       - name: Set up MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Fetch pinned LFG source
+      - name: Build external Frame Generation helper
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force .build | Out-Null
-          git clone https://github.com/furkan-1337/LFG.git .build/LFG
-          git -C .build/LFG checkout cd1a2fa2b4fb26c1b18f13e79ea65bae67bc6531
-          python scripts/patch_lfg.py --source .build/LFG
-
-      - name: Build native frame generation backend
-        shell: powershell
-        run: |
-          msbuild .build\LFG\LFG.sln /m /p:Configuration=Release /p:Platform=x64
-          $dll = ".build\LFG\x64\Release\LFG.dll"
-          if (!(Test-Path $dll)) { throw "LFG.dll was not produced" }
-          Copy-Item $dll third_party\LFG.dll -Force
-          Copy-Item .build\LFG\LICENSE third_party\LFG-LICENSE.txt -Force
-          Set-Content third_party\LFG-UPSTREAM-COMMIT.txt @(
-            "furkan-1337/LFG",
-            "commit cd1a2fa2b4fb26c1b18f13e79ea65bae67bc6531",
-            "https://github.com/furkan-1337/LFG"
-          )
-          $hash = (Get-FileHash third_party\LFG.dll -Algorithm SHA256).Hash.ToLower()
-          Set-Content third_party\LFG-SHA256.txt $hash
-          Write-Host "LFG SHA256: $hash"
+          msbuild native\framegen\SuperRenderFrameGen.vcxproj /m /p:Configuration=Release /p:Platform=x64
+          $helper = "native\framegen\x64\Release\SuperRenderFrameGen.exe"
+          if (!(Test-Path $helper)) { throw "SuperRenderFrameGen.exe was not produced" }
+          Copy-Item $helper third_party\SuperRenderFrameGen.exe -Force
+          $hash = (Get-FileHash third_party\SuperRenderFrameGen.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content third_party\SuperRenderFrameGen-SHA256.txt $hash
+          Write-Host "SuperRenderFrameGen SHA256: $hash"
 
       - name: Install Python build dependencies
         run: |
@@ -73,10 +63,10 @@ jobs:
         run: |
           git config user.name "SuperRender Build"
           git config user.email "actions@users.noreply.github.com"
-          git add dist/SuperRender.exe third_party/LFG.dll third_party/LFG-LICENSE.txt third_party/LFG-SHA256.txt third_party/LFG-UPSTREAM-COMMIT.txt
+          git add dist/SuperRender.exe third_party/SuperRenderFrameGen.exe third_party/SuperRenderFrameGen-SHA256.txt
           git diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
-            git commit -m "build: refresh Windows bundle for v0.5 [skip ci]"
+            git commit -m "build: refresh Windows bundle for external FrameGen [skip ci]"
             git push origin HEAD:main
           } else {
             Write-Host "No binary changes to commit."
