@@ -59,6 +59,9 @@ struct Options {
     int pyramidLevels = 2;
     float dirtyThreshold = 0.025f;
     float earlyExitThreshold = 0.018f;
+    int debugView = 0;
+    float occlusionThreshold = 0.20f;
+    float hudThreshold = 0.035f;
     std::filesystem::path telemetry;
     std::filesystem::path csv;
     std::filesystem::path benchmarkOutput;
@@ -74,8 +77,12 @@ struct Params {
     float costThreshold;
     float dirtyThreshold;
     float earlyExitThreshold;
+    float occlusionThreshold;
+    float hudThreshold;
+    uint32_t debugView;
+    float padding;
 };
-static_assert(sizeof(Params) == 32);
+static_assert(sizeof(Params) == 48);
 
 static const char* kShader = R"HLSL(
 cbuffer Params : register(b0)
@@ -88,6 +95,10 @@ cbuffer Params : register(b0)
     float CostThreshold;
     float DirtyThreshold;
     float EarlyExitThreshold;
+    float OcclusionThreshold;
+    float HudThreshold;
+    uint DebugView;
+    float ParamsPadding;
 };
 
 Texture2D<float4> PrevTex : register(t0);
@@ -102,6 +113,8 @@ Texture2D<float> PrevLuma : register(t3);
 Texture2D<float> CurrLuma : register(t4);
 StructuredBuffer<float4> PreviousMotion : register(t5);
 RWTexture2D<float> LumaOut : register(u2);
+Texture2D<float> HudHistory : register(t7);
+RWTexture2D<float> HudNext : register(u5);
 StructuredBuffer<float4> RawMotion : register(t6);
 RWStructuredBuffer<float4> FilteredMotion : register(u3);
 RWTexture2D<float> ConfidenceOut : register(u4);
@@ -225,42 +238,96 @@ void Flow(uint3 tid : SV_DispatchThreadID)
 
 float4 SampleLinear(Texture2D<float4> tex, float2 p)
 {
-    p = clamp(p, float2(0.0, 0.0), float2((float)Width - 1.0, (float)Height - 1.0));
     float2 uv = (p + 0.5) / float2((float)Width, (float)Height);
     return tex.SampleLevel(LinearClamp, uv, 0.0);
 }
 
-[numthreads(16, 16, 1)]
+float4 DenseFlow(float2 p)
+{
+    uint nx=(Width+BlockSize-1)/BlockSize;
+    uint ny=(Height+BlockSize-1)/BlockSize;
+    // Bilinear interpolation between block centres. Edge clamping is explicit.
+    float2 g=p/max(float(BlockSize),1.0)-0.5;
+    int2 lo=int2(floor(g));
+    float2 f=frac(g);
+    int2 a=clamp(lo,int2(0,0),int2((int)nx-1,(int)ny-1));
+    int2 b=clamp(lo+int2(1,0),int2(0,0),int2((int)nx-1,(int)ny-1));
+    int2 c=clamp(lo+int2(0,1),int2(0,0),int2((int)nx-1,(int)ny-1));
+    int2 d=clamp(lo+int2(1,1),int2(0,0),int2((int)nx-1,(int)ny-1));
+    float4 v0=lerp(MotionIn[a.y*nx+a.x],MotionIn[b.y*nx+b.x],f.x);
+    float4 v1=lerp(MotionIn[c.y*nx+c.x],MotionIn[d.y*nx+d.x],f.x);
+    return lerp(v0,v1,f.y);
+}
+
+float3 HeatColor(float value)
+{
+    return saturate(float3(2.0-2.0*value,2.0*value,0.25));
+}
+
+[numthreads(16,16,1)]
+void UpdateHud(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x>=Width || id.y>=Height) return;
+    float3 a=PrevTex.Load(int3(id.xy,0)).rgb;
+    float3 b=CurrTex.Load(int3(id.xy,0)).rgb;
+    float diff=dot(abs(a-b),float3(0.2126,0.7152,0.0722));
+    float old=HudHistory.Load(int3(id.xy,0));
+    // EMA of static persistence (not a classifier of actual HUD semantics).
+    float staticNow=1.0-saturate(diff/max(HudThreshold,0.0001));
+    HudNext[id.xy]=lerp(old,staticNow,0.06);
+}
+
+[numthreads(16,16,1)]
 void Interpolate(uint3 tid : SV_DispatchThreadID)
 {
-    if (tid.x >= Width || tid.y >= Height) return;
-    uint blocksX = (Width + BlockSize - 1) / BlockSize;
-    uint2 block = min(tid.xy / BlockSize,
-                      uint2(blocksX - 1, (Height + BlockSize - 1) / BlockSize - 1));
-    float4 flow = MotionIn[block.y * blocksX + block.x];
-    float2 motion = flow.xy;
+    if(tid.x>=Width || tid.y>=Height) return;
+    float2 p=float2(tid.xy);
+    float4 flow=DenseFlow(p);
+    float2 motion=flow.xy;
+    float confidence=saturate(flow.w);
+    float4 rawA=PrevTex.Load(int3(tid.xy,0));
+    float4 rawB=CurrTex.Load(int3(tid.xy,0));
+    float4 nearest=Factor<0.5?rawA:rawB;
+    float4 plain=lerp(rawA,rawB,Factor);
+    float persistence=HudHistory.Load(int3(tid.xy,0));
 
-    float2 p = float2(tid.xy);
-    if (flow.z > CostThreshold)
-    {
-        float4 a0 = PrevTex.Load(int3(tid.xy, 0));
-        float4 b0 = CurrTex.Load(int3(tid.xy, 0));
-        OutputTex[tid.xy] = lerp(a0, b0, Factor);
+    if(DebugView==1) {
+        OutputTex[tid.xy]=float4(HeatColor(confidence),1);
         return;
     }
+    if(DebugView==2) {
+        OutputTex[tid.xy]=float4(saturate(0.5+motion/max(float(BlockSize),1.0)*0.5),
+                                confidence,1);
+        return;
+    }
+    float2 pa=p-Factor*motion;
+    float2 pb=p+(1.0-Factor)*motion;
+    bool outside=any(pa<0.0)||any(pb<0.0)||
+                 any(pa>float2(Width-1,Height-1))||
+                 any(pb>float2(Width-1,Height-1));
+    if(outside) { OutputTex[tid.xy]=nearest; return; }
 
-    float2 prevP = p - Factor * motion;
-    float2 currP = p + (1.0 - Factor) * motion;
-    float4 a = SampleLinear(PrevTex, prevP);
-    float4 b = SampleLinear(CurrTex, currP);
-
-    // Static/high-contrast UI naturally tends toward zero motion. This
-    // confidence-weighted blend also avoids over-warping uncertain blocks.
-    float confidence = saturate(1.0 - flow.z / max(CostThreshold, 0.0001));
-    float4 warped = lerp(a, b, Factor);
-    float4 plain = lerp(PrevTex.Load(int3(tid.xy, 0)),
-                        CurrTex.Load(int3(tid.xy, 0)), Factor);
-    OutputTex[tid.xy] = lerp(plain, warped, confidence);
+    // Hard reject unreliable vectors and small fast objects.
+    if(confidence<0.15 || (flow.z>EarlyExitThreshold*5.0 && confidence<0.45)) {
+        OutputTex[tid.xy]=nearest;
+        return;
+    }
+    float4 a=SampleLinear(PrevTex,pa);
+    float4 b=SampleLinear(CurrTex,pb);
+    float disagreement=dot(abs(a.rgb-b.rgb),float3(0.2126,0.7152,0.0722));
+    float4 warped=lerp(a,b,Factor);
+    if(disagreement>OcclusionThreshold) {
+        // Single-sided candidate based on similarity to an observed endpoint.
+        float costA=dot(abs(a.rgb-rawB.rgb),float3(0.2126,0.7152,0.0722));
+        float costB=dot(abs(b.rgb-rawA.rgb),float3(0.2126,0.7152,0.0722));
+        warped=costA<costB?a:b;
+        confidence*=0.45;
+    }
+    // Avoid bilinear ghosting in uncertain areas.
+    float4 fallback=confidence<0.5?nearest:plain;
+    float strength=saturate((confidence-0.15)/0.55);
+    if(persistence>0.9) strength=0;
+    OutputTex[tid.xy]=lerp(fallback,warped,strength);
 }
 
 [numthreads(16, 16, 1)]
@@ -624,6 +691,20 @@ private:
         hr = m_device->CreateUnorderedAccessView(m_confidence.Get(), nullptr, &m_confidenceUav);
         if (FAILED(hr)) return false;
 
+        // Temporal static-pixel persistence, two ping-pong R8 resources.
+        D3D11_TEXTURE2D_DESC hudDesc = input;
+        hudDesc.Format = DXGI_FORMAT_R8_UNORM;
+        hudDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        for (int i=0;i<2;++i) {
+            hr=m_device->CreateTexture2D(&hudDesc,nullptr,&m_hud[i]);
+            if (FAILED(hr)) return false;
+            hr=m_device->CreateShaderResourceView(m_hud[i].Get(),nullptr,&m_hudSrv[i]);
+            if (FAILED(hr)) return false;
+            hr=m_device->CreateUnorderedAccessView(m_hud[i].Get(),nullptr,&m_hudUav[i]);
+            if (FAILED(hr)) return false;
+            const float clear[4]={0,0,0,0};
+            m_context->ClearUnorderedAccessViewFloat(m_hudUav[i].Get(),clear);
+        }
         // R8_UNORM pyramid. Full-color textures remain exclusive to synthesis.
         D3D11_TEXTURE2D_DESC luma = input;
         luma.Format = DXGI_FORMAT_R8_UNORM;
@@ -696,6 +777,7 @@ private:
     bool CompileShaders(std::wstring& error) {
         return CompileOne("Flow", m_flowCs, error) &&
                CompileOne("FilterMotion", m_filterCs, error) &&
+               CompileOne("UpdateHud", m_hudCs, error) &&
                CompileOne("LumaDownsample", m_lumaCs, error) &&
                CompileOne("LumaQuarter", m_quarterCs, error) &&
                CompileOne("Interpolate", m_interpCs, error) &&
@@ -714,15 +796,19 @@ private:
             p->costThreshold = 0.16f;
             p->dirtyThreshold = m_options.dirtyThreshold;
             p->earlyExitThreshold = m_options.earlyExitThreshold;
+            p->occlusionThreshold = m_options.occlusionThreshold;
+            p->hudThreshold = m_options.hudThreshold;
+            p->debugView = (uint32_t)m_options.debugView;
+            p->padding = 0;
             m_context->Unmap(m_params.Get(), 0);
         }
     }
 
     void Unbind() {
-        ID3D11ShaderResourceView* nullSrv[7] = {};
-        ID3D11UnorderedAccessView* nullUav[5] = {};
-        m_context->CSSetShaderResources(0, 7, nullSrv);
-        m_context->CSSetUnorderedAccessViews(0, 5, nullUav, nullptr);
+        ID3D11ShaderResourceView* nullSrv[8] = {};
+        ID3D11UnorderedAccessView* nullUav[6] = {};
+        m_context->CSSetShaderResources(0, 8, nullSrv);
+        m_context->CSSetUnorderedAccessViews(0, 6, nullUav, nullptr);
         m_context->CSSetShader(nullptr, nullptr, 0);
     }
 
@@ -772,6 +858,22 @@ private:
         m_context->CopyResource(m_motionPrevious.Get(),m_motionFiltered.Get());
     }
 
+    void DispatchHud() {
+        UpdateParams(0.0f);
+        int next=1-m_hudIndex;
+        ID3D11ShaderResourceView* inputs[2]={m_prevSrv.Get(),m_currSrv.Get()};
+        auto history=m_hudSrv[m_hudIndex].Get();
+        auto dest=m_hudUav[next].Get();
+        m_context->CSSetShader(m_hudCs.Get(),nullptr,0);
+        m_context->CSSetConstantBuffers(0,1,m_params.GetAddressOf());
+        m_context->CSSetShaderResources(0,2,inputs);
+        m_context->CSSetShaderResources(7,1,&history);
+        m_context->CSSetUnorderedAccessViews(5,1,&dest,nullptr);
+        m_context->Dispatch((m_width+15)/16,(m_height+15)/16,1);
+        Unbind();
+        m_hudIndex=next;
+    }
+
     void DispatchFrame(float factor, bool interpolate) {
         UpdateParams(factor);
         ID3D11ShaderResourceView* srvs[3] = {
@@ -782,6 +884,8 @@ private:
         m_context->CSSetConstantBuffers(0, 1, m_params.GetAddressOf());
         m_context->CSSetShaderResources(0, 3, srvs);
         m_context->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+        auto history=m_hudSrv[m_hudIndex].Get();
+        m_context->CSSetShaderResources(7,1,&history);
         m_context->CSSetSamplers(0, 1, m_sampler.GetAddressOf());
         m_context->Dispatch((m_width + 15) / 16, (m_height + 15) / 16, 1);
         Unbind();
@@ -946,6 +1050,7 @@ private:
                 auto* filterPass = StartPass(6);
                 DispatchFilter();
                 StopPass(filterPass);
+                DispatchHud();
                 m_havePair = true;
             }
             StopPass(copyPass);
@@ -1132,7 +1237,11 @@ private:
     ComPtr<ID3D11Buffer> m_motion, m_params;
     ComPtr<ID3D11SamplerState> m_sampler;
     ComPtr<ID3D11ComputeShader> m_flowCs, m_interpCs, m_copyCs;
-    ComPtr<ID3D11ComputeShader> m_lumaCs, m_quarterCs, m_filterCs;
+    ComPtr<ID3D11ComputeShader> m_lumaCs, m_quarterCs, m_filterCs, m_hudCs;
+    ComPtr<ID3D11Texture2D> m_hud[2];
+    ComPtr<ID3D11ShaderResourceView> m_hudSrv[2];
+    ComPtr<ID3D11UnorderedAccessView> m_hudUav[2];
+    int m_hudIndex = 0;
     ComPtr<ID3D11Buffer> m_motionFiltered;
     ComPtr<ID3D11ShaderResourceView> m_motionFilteredSrv;
     ComPtr<ID3D11UnorderedAccessView> m_motionFilteredUav;
@@ -1192,6 +1301,15 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& out) {
             if (auto v = next()) out.dirtyThreshold = (float)_wtof(v);
         } else if (arg == L"--early-exit-threshold") {
             if (auto v = next()) out.earlyExitThreshold = (float)_wtof(v);
+        } else if (arg == L"--debug-view") {
+            if (auto v = next()) {
+                std::wstring mode=v;
+                out.debugView = mode==L"confidence"?1:(mode==L"vectors"?2:0);
+            }
+        } else if (arg == L"--occlusion-threshold") {
+            if (auto v = next()) out.occlusionThreshold=(float)_wtof(v);
+        } else if (arg == L"--hud-threshold") {
+            if (auto v = next()) out.hudThreshold=(float)_wtof(v);
         } else if (arg == L"--telemetry") {
             if (auto v = next()) out.telemetry = v;
         }
@@ -1199,6 +1317,8 @@ static bool ParseOptions(int argc, wchar_t** argv, Options& out) {
     out.targetFps = std::clamp(out.targetFps, 30, 240);
     out.dirtyThreshold = std::clamp(out.dirtyThreshold, 0.001f, 0.5f);
     out.earlyExitThreshold = std::clamp(out.earlyExitThreshold, 0.001f, 0.5f);
+    out.occlusionThreshold = std::clamp(out.occlusionThreshold, 0.01f, 1.0f);
+    out.hudThreshold = std::clamp(out.hudThreshold, 0.001f, 0.5f);
     out.blockSize = std::clamp(out.blockSize, 8, 64);
     // Keep an even radius because the lightweight search advances by 2 pixels.
     out.searchRadius = std::clamp(out.searchRadius, 2, 24);
