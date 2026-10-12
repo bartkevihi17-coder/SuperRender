@@ -1,10 +1,14 @@
 """Render (Beta): adaptive planning layer for the SuperRender hybrid engine.
 
-This module does not pretend to generate frames before a renderer exists.
-It creates a stable contract between the launcher/UI and future native render
-backends (external capture, integrated temporal reconstruction and lightweight
-fallback), records the selected plan and keeps protected/online games on the
-non-invasive path by default.
+Quality-first rule:
+- Render never applies the Potato/Optimized graphics reductions.
+- A pending SuperRender graphics session is restored before Render starts.
+- Real frame generation is preferred when the bundled DX11 backend is
+  available and the game is a verified x64 executable.
+- Protected/competitive titles stay on the non-invasive path by default.
+
+The native backend is intentionally experimental and offline-oriented. No
+anticheat bypass is attempted.
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .library import APP_DATA
+from .render_backend import framegen_available_for_game
 
 
 _RENDER_SESSIONS = APP_DATA / "render_sessions"
@@ -35,6 +40,7 @@ class RenderCapabilities:
     gpu_name: str
     integrated_adapter: bool
     protected_hint: bool
+    framegen_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class RenderPlan:
     def label(self) -> str:
         names = {
             "integrated": "Integrado",
+            "dx11-framegen": "FrameGen DX11",
             "external": "Externo",
             "light": "Leve",
         }
@@ -97,29 +104,20 @@ def _protected_hint(game: dict) -> bool:
 
 def inspect_capabilities(game: dict) -> RenderCapabilities:
     exe = Path(str(game.get("exe") or ""))
-    # Future adapters can set this only when they can expose motion/depth data
-    # or another supported temporal-integration contract.
     integrated = bool(game.get("render_integration"))
+    protected = _protected_hint(game)
     return RenderCapabilities(
         windows=os.name == "nt",
         executable_known=exe.is_file(),
         gpu_name=_gpu_name(),
         integrated_adapter=integrated,
-        protected_hint=_protected_hint(game),
+        protected_hint=protected,
+        framegen_available=(not protected and framegen_available_for_game(game)),
     )
 
 
 def choose_plan(game: dict, caps: RenderCapabilities | None = None) -> RenderPlan:
-    """Select the safest useful render path.
-
-    Order:
-      1. Integrated temporal path when a verified adapter exists.
-      2. External capture/reconstruction path for normal desktop games.
-      3. Lightweight path when capture cannot be prepared safely.
-
-    Protected/online hints never select the future invasive integrated path
-    automatically. This is policy, not an anticheat bypass mechanism.
-    """
+    """Select the best currently available quality-first path."""
     caps = caps or inspect_capabilities(game)
     if not caps.windows:
         return RenderPlan(
@@ -127,30 +125,37 @@ def choose_plan(game: dict, caps: RenderCapabilities | None = None) -> RenderPla
             "Render Beta requer Windows; usando caminho leve.", caps.gpu_name,
         )
 
-    if caps.integrated_adapter and not caps.protected_hint:
-        return RenderPlan(
-            "integrated", "temporal", "2x", 2, True,
-            "Adaptador temporal verificado disponivel; priorizando dados internos da cena.",
-            caps.gpu_name,
-        )
-
-    if caps.executable_known and not caps.protected_hint:
-        return RenderPlan(
-            "external", "spatial-adaptive", "2x-experimental", 2, False,
-            "Sem adaptador temporal; selecionado pipeline externo com reconstrucao leve.",
-            caps.gpu_name,
-        )
-
     if caps.protected_hint:
         return RenderPlan(
-            "light", "spatial-when-available", "off", 1, False,
-            "Jogo com indicio de protecao/online: caminho nao invasivo selecionado automaticamente.",
+            "light", "preserve-native", "off", 1, False,
+            "Jogo com indicio de protecao/online: nenhuma injecao e nenhum bypass de anticheat.",
+            caps.gpu_name,
+        )
+
+    if caps.integrated_adapter:
+        return RenderPlan(
+            "integrated", "temporal", "adaptive", 4, True,
+            "Adaptador temporal verificado disponivel; preservando qualidade nativa.",
+            caps.gpu_name,
+        )
+
+    if caps.framegen_available:
+        return RenderPlan(
+            "dx11-framegen", "preserve-native", "adaptive-2x-4x", 4, True,
+            "Backend DX11 x64 disponivel; o jogo mantem seus graficos e o motor cria frames intermediarios.",
+            caps.gpu_name,
+        )
+
+    if caps.executable_known:
+        return RenderPlan(
+            "external", "preserve-native", "off", 1, False,
+            "Executavel reconhecido, mas esta compilacao ainda nao inclui um backend compativel.",
             caps.gpu_name,
         )
 
     return RenderPlan(
-        "light", "spatial-when-available", "off", 1, False,
-        "Executavel real nao identificado; usando caminho leve ate haver captura verificavel.",
+        "light", "preserve-native", "off", 1, False,
+        "Executavel real nao identificado; preservando configuracao do jogo sem prometer Frame Generation.",
         caps.gpu_name,
     )
 
@@ -161,20 +166,21 @@ def _session_path(game: dict) -> Path:
 
 
 def record_plan(game: dict, plan: RenderPlan) -> Path:
-    """Persist the selected plan for debugging and future benchmark decisions."""
     _RENDER_SESSIONS.mkdir(parents=True, exist_ok=True)
     path = _session_path(game)
     data = {
-        "version": 1,
+        "version": 2,
         "session_id": uuid.uuid4().hex,
         "created_unix": time.time(),
         "game_id": game.get("id"),
         "game_name": game.get("name"),
         "exe": game.get("exe"),
+        "quality_policy": "preserve-native",
         "plan": asdict(plan),
         "metrics": {
             "base_fps": None,
             "presented_fps": None,
+            "generated_between": None,
             "engine_cost_ms": None,
             "latency_ms": None,
         },
@@ -183,6 +189,21 @@ def record_plan(game: dict, plan: RenderPlan) -> Path:
     temp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     os.replace(temp, path)
     return path
+
+
+def update_session_metrics(game: dict, **metrics) -> None:
+    path = _session_path(game)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        stored = data.setdefault("metrics", {})
+        for key, value in metrics.items():
+            if key in stored:
+                stored[key] = value
+        temp = path.with_suffix(path.suffix + ".tmp")
+        temp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(temp, path)
+    except (OSError, ValueError, TypeError):
+        pass
 
 
 def prepare_render(game: dict) -> RenderPlan:
@@ -194,7 +215,7 @@ def prepare_render(game: dict) -> RenderPlan:
 def plan_summary(plan: RenderPlan) -> str:
     parts = [
         f"Render Beta: {plan.label}",
-        f"reconstrucao {plan.reconstruction}",
+        "qualidade nativa preservada",
         f"geracao {plan.frame_generation}",
     ]
     if plan.gpu_name:
