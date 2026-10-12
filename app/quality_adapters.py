@@ -11,6 +11,10 @@ quality-first preset without permanently taking over the user's settings.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
+
+from .quality_budgeter import Knob, HardwareKey, load_cache, solve
+from .library import APP_DATA
 
 
 QualityAdapter = Callable[[dict], dict]
@@ -56,6 +60,53 @@ def _nba2k20_high(current: dict) -> dict:
         "CACHE_SPOT_SHADOWS": True,
         "CACHE_SUN_SHADOWS": True,
     }
+
+
+
+# Visual weights are priors, not benchmark results. Low is the baseline.
+NBA2K20_KNOBS: tuple[Knob, ...] = (
+    Knob("TEXTURELOD", 2, (2, 1, 0), (0, 5, 10)),
+    Knob("PLAYERLOD", 2, (2, 1, 0), (0, 6, 10)),
+    Knob("CROWDLOD", 3, (3, 2, 0), (0, 2, 5)),
+    Knob("HAIRLOD", 2, (2, 1, 0), (0, 2, 5)),
+    Knob("MAXANISOTROPY", 1, (1, 4, 16), (0, 2, 4)),
+    Knob("SHADOW_DETAIL", 4, (4, 2, 1), (0, 3, 6)),
+    Knob("AMBIENT_OCCLUSION", False, (False, True), (0, 4)),
+    Knob("VOLUMETRIC_LIGHTING", False, (False, True), (0, 3)),
+    Knob("DEPTH_OF_FIELD", False, (False, True), (0, 1)),
+    Knob("FLOOR_REFLECTIONS", False, (False, True), (0, 3)),
+    Knob("BLOOM", False, (False, True), (0, 2)),
+)
+
+
+def quality_knobs(adapter: str | None) -> tuple[Knob, ...]:
+    return NBA2K20_KNOBS if adapter == "nba2k20" else ()
+
+
+def render_budgeted_changes(
+    adapter: str | None, current: dict, *,
+    game_id: str, gpu: str, driver: str,
+    target_p95_ms: float = 33.0,
+    cache_dir: Path | None = None,
+) -> dict:
+    """Select only from a validated hardware-keyed calibration.
+
+    Returned changes are fed into optimization.prepare_game, which owns backups.
+    """
+    knobs = quality_knobs(adapter)
+    if not knobs or not gpu or not driver:
+        return {}
+    resolution = f'{current.get("WIDTH")}x{current.get("HEIGHT")}'
+    key = HardwareKey(game_id, gpu, driver, resolution)
+    report = load_cache(cache_dir or APP_DATA / "quality_calibration", key)
+    if report is None:
+        return {}  # No speculative 'high' preset.
+    try:
+        choice = solve(knobs, report, target_p95_ms)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    return {name: value for name, value in choice["settings"].items()
+            if current.get(name) != value}
 
 
 QUALITY_ADAPTERS: dict[str, QualityAdapter] = {
